@@ -28,6 +28,17 @@ def b_cc_chunking():
 
 
 """
+FROM chunking
+extracting entire from line
+
+NOTE does it make sense to extract entire subject line as one chunk bc it's relatively short / contextually concise?
+"""
+def from_chunking():
+    from_chunk = df['From']
+    from_chunk.to_csv("chunks/from_chunk.csv", index=True)
+
+
+"""
 SUBJECT chunking
 extracting entire subject line
 
@@ -75,6 +86,7 @@ def body_chunking(chunk_size, overlap):
 def main():
     to_chunking()
     b_cc_chunking()
+    from_chunking()
     subj_chunking()
     # test_chunking = ['the', 'cat', 'jumped', 'over', 'the', 'brown', 'fox', '!']
     # print(body_chunking_helper(test_chunking, 3, 2))
