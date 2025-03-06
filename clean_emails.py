@@ -107,18 +107,15 @@ def tokenize_text(text):
    Purpose: Tokenize text into words and apply lemmatization using spaCy.
    """
    if not text or pd.isna(text):
-       return []
-
+       return [], []
 
    # processing text with spaCy
    doc = nlp(text)
 
-
    # extracting tokens and apply lemmatization
    tokens = [token.lemma_ for token in doc if token.is_alpha or token.is_punct]
-
-
-   return tokens
+   tokens_label = [token.ent_type_ if token.ent_type_ else '0' for token in doc]
+   return tokens, tokens_label
 
 
 def preprocess_data(input_path, output_path, max_rows=None):
@@ -153,11 +150,10 @@ def preprocess_data(input_path, output_path, max_rows=None):
 
    # cleaning and tokenizing the email body
    df['body_clean'] = df['body'].apply(clean_text)
-   df['body_tokens'] = df['body_clean'].apply(tokenize_text)
-
+   df['body_tokens'], df['body_tokens_labeled'] = zip(*df['body_clean'].apply(tokenize_text))
 
    # selecting all the required columns
-   df = df[['From', 'To', 'subject_clean', 'body_clean', 'subject_tokens', 'body_tokens']]
+   df = df[['From', 'To', 'subject_clean', 'body_clean', 'subject_tokens', 'body_tokens', 'body_tokens_labeled']]
 
 
    # save the processed data
