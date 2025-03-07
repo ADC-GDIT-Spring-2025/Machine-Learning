@@ -8,33 +8,44 @@ and resulting effects on how data is used with spacy
 
 import spacy
 from spacy.training.example import Example
-import random
 from collections import deque
 from sklearn.metrics import f1_score
 
 
+"""
 # 1. tokenize and label text
 def tokenize_and_label(text, nlp):
     doc = nlp(text)
     tokens = [token.text for token in doc]
     token_labels = [token.ent_type_ if token.ent_type_ else '0' for token in doc]
     return tokens, token_labels
+"""
 
+"""
 # 2. chunk tokens w/ chunk and overlap size
-def chunk_text(tokens, chunk_size, overlap_size):
-    chunks = []
-    queue = deque(maxlen=chunk_size)
+def chunk_text(tokens, token_labels, chunk_size, overlap_size):
+    chunks_tokens = []
+    chunks_labels = []
 
-    for token in tokens:
+    queue_tokens = deque(maxlen=chunk_size)
+
+
+    for token, label in tokens, token_labels:
         queue.append(token)
         if len(queue) == chunk_size:
-            chunks.append(list(queue))
+            chunks_tokens.append(list(queue))
             if overlap_size > 0:
                 for _ in range(chunk_size - overlap_size):
                     queue.popleft()
 
-    return chunks
+    
 
+    print(chunks)
+
+    return chunks
+"""
+
+"""
 # 3. convert chunking data into spaCy format for training data
 def format_training_data(chunks, text, nlp):
     training_data = []
@@ -50,6 +61,7 @@ def format_training_data(chunks, text, nlp):
         training_data.append((doc.text, {"entities": entities}))
 
     return training_data
+"""
 
 # 4. training model with spacy formated chunked data
 # need help implementing logic for training model using spaCy
@@ -83,10 +95,9 @@ def train_model(training_data, n_iter=10):
     return nlp
 """
 
-
+"""
 # 5. evaluate model on test data using F1 score
 def evaluate_model(nlp, test_data):
-    """
     true_labels = []
     pred_labels = []
 
@@ -100,13 +111,12 @@ def evaluate_model(nlp, test_data):
 
     f1 = f1_score(true_labels, pred_labels, average="macro")
     return f1
-    """
+"""
 
-
-def main(train_text, test_text, chunk_size, overlap_size):
+"""
+def main_model(train_text, test_text, chunk_size, overlap_size):
     nlp = spacy.load("en_core_web_sm")
 
-    """
     tokens, token_labels = tokenize_and_label(train_text, nlp)
     chunks = chunk_text(tokens, chunk_size, overlap_size)
     training_data = format_training_data(chunks, train_text, nlp)
@@ -118,12 +128,35 @@ def main(train_text, test_text, chunk_size, overlap_size):
 
     f1 = evaluate_model(trained_model, test_data)
     print("F1 Score: {}".format(f1))
-    """
+"""
 
 
-train_text = "Sally Hanson was born in California. She worked as a surf instruction in San Diego."
-test_text = "Matt Johnson was born in New York. He worked as a waitress in Manhatten."
-main(train_text, test_text, 3, 2)
+def main():
+    nlp = spacy.load("en_core_web_sm")
+    train_text = "Sally Hanson was born in California. She worked as a surf instruction in San Diego."
+    test_text = "Matt Johnson was born in New York. He worked as a waitress in Manhatten."
+
+    doc = nlp(train_text)
+    noun_chunks = list(doc.noun_chunks)
+
+    #for chunk in doc.noun_chunks:
+        #root = chunk.root
+        # print(f"chunk: {chunk.text}, label: {root.pos_}, pos: {root.pos}")
+
+    train_data = []
+    for chunk in noun_chunks:
+        entity = (chunk.start_char, chunk.end_char, chunk.label_)
+        train_data.append((train_text[chunk.start_char:chunk.end_char], {"entities": [entity]}))
+
+    for data in train_data:
+        print(data)
+
+    # tokens = tokenize_and_label(train_text, nlp)
+    # chunk_text(tokens, 3, 1)
+
+main()
+
+
 
 
 
