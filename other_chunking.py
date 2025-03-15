@@ -30,8 +30,6 @@ def b_cc_chunking():
 """
 SUBJECT chunking
 extracting entire subject line
-
-NOTE does it make sense to extract entire subject line as one chunk bc it's relatively short / contextually concise?
 """
 def subj_chunking():
     subj_chunk = df['subject_clean']
