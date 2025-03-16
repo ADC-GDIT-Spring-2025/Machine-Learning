@@ -1,91 +1,53 @@
 import pandas as pd
-from gliner import GLiNER
-
+from sklearn.feature_extraction.text import TfidVectorizer
 df = pd.read_csv('data/filtered.csv')
-df_test = df.iloc[0:1]
-df_test['body_clean'].astype("string")
+
+def chunking(text, chunk_size, overlap_size):
+    chunks = []
+    start_idx = 0
+
+    while start_idx < (len(text) - 1):
+        end_idx = min(start_idx + chunk_size, len(text))
+        chunks.append([text[start_idx:end_idx]])
+        start_idx += (chunk_size - overlap_size)
+    return chunks
+
+def tf_idf(chunks, top_n):
+    # add tf-idf analysis for each chunk
+    tf_idf = []
+
+    for index, row in df.iterrows():
+        chunks = row['ner_chunks']
+        tf_idf_row = []
+
+        vectorizer = TfidfVectorizer()
+
+        for chunk in chunks:
+            tf_idf_matrix = vectorizer.fit_transform([chunk])
+            feature_names = vectorizer.get_feature_names_out()
+
+            scores = zip(feature_names, tf_idf_matrix.toarray().flatten())
+            sorted_scores = sorted(scores, key=lambda x: x[1], reverse=True)
+
+            top_words = [word for word, score in sorted_scores[:top_n]]
+            tf_idf_row.append(top_words)
+
+        tf_idf.append(tf_idf)
+
+    return tf_idf
 
 
-model = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
-entity_types = [
-    "action_item", "person", "meeting_time"
-]
+def df_chunking(chunk_size, overlap_size, top_n):
+    df['ner_chunks'] = None
+
+    for index, row in df.iterrows():
+        body_text = str(row['body_clean'])
+        ner_chunk = chunking(body_text, chunk_size, overlap_size)
+        tf_idf = tf_idf(ner_chunk, top_n)
+        df.at[index, 'ner_chunks'] = ner_chunk
+        df.at[index, 'tf_idf'] = tf_idf
 
 
 
-examples = [
-    # Action item examples with context
-    {
-        "text": "Can you please prepare the slides for tomorrow's meeting?",
-        "entities": [{"text": "prepare", "label": "action_item"}]
-    },
-    {
-        "text": "We need to schedule a follow-up discussion next week.",
-        "entities": [{"text": "schedule", "label": "action_item"}]
-    },
-    {
-        "text": "Please send the report to the team by EOD.",
-        "entities": [{"text": "send", "label": "action_item"}]
-    },
-    {
-        "text": "Make sure to review the documentation before submitting.",
-        "entities": [{"text": "review", "label": "action_item"}]
-    },
-    
-    # Person examples
-    {
-        "text": "I spoke with Philip about the project timeline.",
-        "entities": [{"text": "Philip", "label": "person"}]
-    },
-    
-    # Meeting time examples
-    {
-        "text": "Let's meet Monday at 10:00 AM to discuss this further.",
-        "entities": [{"text": "Monday at 10:00 AM", "label": "meeting_time"}]
-    }
-]
-
-"""
-creating examples 
-"""
-sample_texts = df_test['body_clean'].iloc[:5].tolist()
-
-# Create examples from your actual data
-custom_examples = []
-for text in sample_texts:
-    # Focus on sentences with action verbs
-    sentences = text.split('.')
-    for sentence in sentences:
-        if any(verb in sentence.lower() for verb in ["prepare", "schedule", "send", "review", "complete", "holding"]):
-            custom_examples.append({
-                "text": sentence.strip(),
-                "entities": [{"text": sentence.strip(), "label": "action_item"}]
-            })
-
-# Use these examples if any were found
-if custom_examples:
-    print(f"Created {len(custom_examples)} custom examples from your data")
-    examples.extend(custom_examples)
-
-"""
-examples = {
-    "action_item": ["prepare", "hold", "schedule", "send", "review"],
-    "person": ['philip', 'george fichards', 'thomas richards', 'amy'],
-    "meeting_time": ["3pm", "tomorrow", "Monday", "10:00 AM"]
-}
-"""
-
-for entity_type in entity_types:
-    df[f'{entity_type}_extracted'] = [[] for _ in range(len(df))]
-
-for index, row in df_test.iterrows():
-    entities = model.predict_entities(row['body_clean'], ["person", "meeting_time"], threshold=0.5)
-    action_entities = model.predict_entities(row['body_clean'], ["action_item"], threshold=0.05)
-    all_entities = entities + action_entities
-
-    for entity in all_entities:
-        df.at[index, f'{entity["label"]}_extracted'].append(entity["text"])
-        print(entity["text"], "=>", entity["label"])
-
-
-df.to_csv('data/emails_with_extracted_info.csv', index=False)
+df_chunking(15, 3, 5)
+df.to_csv('data/emails_with_ner_chunking.csv', index=False)
