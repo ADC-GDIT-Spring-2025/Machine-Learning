@@ -1,4 +1,5 @@
 import pandas as pd
+import ast
 from sklearn.feature_extraction.text import TfidfVectorizer
 df = pd.read_csv('data/filtered.csv')
 
@@ -64,9 +65,6 @@ def df_chunking(chunk_size, overlap_size, top_n):
         df.at[index, 'tf_idf'] = tf_idf
 
 
-
-# need to debug!!
-# extra brackets, chunks are not one single string
 """
 chunking body of text by words
 """
@@ -76,7 +74,7 @@ def chunking_word(text, chunk_size, overlap_size):
 
     while start_idx < (len(text) - 1):
         end_idx = min(start_idx + chunk_size, len(text))
-        chunk = [''.join(text[start_idx:end_idx])]
+        chunk = [' '.join(text[start_idx:end_idx])]
         chunks.append(chunk)
         start_idx += (chunk_size - overlap_size)
     return chunks
@@ -87,12 +85,13 @@ def df_chunking_word(chunk_size, overlap_size, top_n):
 
     for index, row in df.iterrows():
         body_text = str(row['body_tokens']).split()
-        ner_chunk = chunking_word(body_text, chunk_size, overlap_size)
+        tokens = ast.literal_eval(row['body_tokens'])
+        ner_chunk = chunking_word(tokens, chunk_size, overlap_size)
         tf_idf = tf_idf_calc(ner_chunk, top_n)
         df.at[index, 'ner_chunks_word'] = ner_chunk
         df.at[index, 'tf_idf_word'] = tf_idf
 
 
 df_chunking(150, 3, 5)
-# df_chunking_word(15, 3, 5)
+df_chunking_word(15, 3, 5)
 df.to_csv('data/emails_with_ner_chunking.csv', index=False)
