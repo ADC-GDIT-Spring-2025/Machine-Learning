@@ -84,9 +84,8 @@ def df_chunking_word(chunk_size, overlap_size, top_n):
     df['tf_idf_word'] = None
 
     for index, row in df.iterrows():
-        body_text = str(row['body_tokens']).split()
-        tokens = ast.literal_eval(row['body_tokens'])
-        ner_chunk = chunking_word(tokens, chunk_size, overlap_size)
+        body_text = ast.literal_eval(row['body_tokens'])
+        ner_chunk = chunking_word(body_text, chunk_size, overlap_size)
         tf_idf = tf_idf_calc(ner_chunk, top_n)
         df.at[index, 'ner_chunks_word'] = ner_chunk
         df.at[index, 'tf_idf_word'] = tf_idf
