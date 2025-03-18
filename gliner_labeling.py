@@ -6,6 +6,7 @@ df_test = df.iloc[0:1]
 df_test['body_clean'].astype("string")
 
 
+# other labels: legal terms, department/team, location, financial data
 model = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
 entity_types = [
     "action_item", "person", "meeting_time"
