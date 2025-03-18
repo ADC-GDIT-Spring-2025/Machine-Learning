@@ -1,8 +1,9 @@
 import pandas as pd
 import ast
 from sklearn.feature_extraction.text import TfidfVectorizer
-df = pd.read_csv('data/filtered.csv')
 
+
+df = pd.read_csv('data/filtered.csv')
 
 """
 calculating tf-idf scores
@@ -16,11 +17,11 @@ def tf_idf_calc(chunks, top_n):
         chunk_text = chunk[0] if isinstance(chunk, list) and len(chunk) == 1 else str(chunk)
         
         # ensure there's actual content to analyze
-        if not chunk_text or chunk_text.isspace():
+        if not chunk_text:
             tf_idf_results.append([])
             continue
             
-        vectorizer = TfidfVectorizer(stop_words=None)
+        vectorizer = TfidfVectorizer(stop_words='english')
         
         try:
             tf_idf_matrix = vectorizer.fit_transform([chunk_text])
@@ -47,7 +48,7 @@ def chunking(text, chunk_size, overlap_size):
     chunks = []
     start_idx = 0
 
-    while start_idx < (len(text) - 1):
+    while start_idx < len(text):
         end_idx = min(start_idx + chunk_size, len(text))
         chunks.append([text[start_idx:end_idx]])
         start_idx += (chunk_size - overlap_size)
@@ -72,7 +73,7 @@ def chunking_word(text, chunk_size, overlap_size):
     chunks = []
     start_idx = 0
 
-    while start_idx < (len(text) - 1):
+    while start_idx < len(text):
         end_idx = min(start_idx + chunk_size, len(text))
         chunk = [' '.join(text[start_idx:end_idx])]
         chunks.append(chunk)
