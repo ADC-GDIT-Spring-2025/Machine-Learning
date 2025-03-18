@@ -1,138 +1,130 @@
 import pandas as pd
+import email
 import re
 import spacy
 
-# loading spaCy's small English model
+# Load spaCy's small English model
 nlp = spacy.load("en_core_web_sm")
 
-def parse_emails(file_path):
+def get_text_from_email(msg):
+    """Extract the plain text content from an email message."""
+    parts = []
+    for part in msg.walk():
+        if part.get_content_type() == 'text/plain':
+            parts.append(part.get_payload())
+    return ''.join(parts)
+
+def split_email_addresses(line):
     """
-    Purpose: Parse a raw email file and extract email messages.
+    Separate multiple email addresses and strip extra whitespace.
+    If there's only one address, return it as a string.
+    If there are multiple, return them as a comma-separated string.
     """
-    emails = []
-    current_email = {}
-
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-
-            # checking for email headers
-            if line.startswith(('Subject:', 'From:', 'To:', 'cc:', 'bcc:', 'Mime-Version:', 'Content-Type:', 'X-From:', 'X-To:', 'X-cc:', 'X-bcc:', 'X-Folder:', 'X-Origin:', 'X-FileName:')):
-                key, value = line.split(':', 1)
-                current_email[key.strip()] = value.strip()
-
-            # checking for the start of the email body
-            elif line == '' and 'body' not in current_email:
-                current_email['body'] = ''
-
-            # appending lines to the email body
-            elif 'body' in current_email:
-                current_email['body'] += line + '\n'
-
-            # checking for the end of an email message
-            if line.startswith('-----'):
-                emails.append(current_email)
-                current_email = {}
-
-        # appending the last email if the file doesn't end with a separator
-        if current_email:
-            emails.append(current_email)
-
-    return emails
+    if line:
+        addrs = list(map(lambda x: x.strip(), line.split(',')))
+        return addrs[0] if len(addrs) == 1 else ', '.join(addrs)
+    else:
+        return None
 
 def clean_text(text):
     """
-    Purpose: Clean and preprocess text.
+    Clean and preprocess text:
+      - Convert to lowercase.
+      - Remove forwarded message markers, email headers in the body,
+        message IDs, timestamps, URLs, and email addresses.
+      - Remove unwanted special characters and normalize whitespace.
     """
     if pd.isna(text):
         return ""
-
-    # Convert text to lowercase
     text = text.lower()
-
-    # Remove email forward markers and headers
     text = re.sub(r'---+ ?forwarded by.+?---+', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'---+ ?original message.+?---+', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'---+ ?forwarded message.+?---+', ' ', text, flags=re.DOTALL | re.IGNORECASE)
-
-    # Remove email headers in the body
     text = re.sub(r'from:.*?(?=\n\n|\n\w)', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'sent:.*?(?=\n\n|\n\w)', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'to:.*?(?=\n\n|\n\w)', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'subject:.*?(?=\n\n|\n\w)', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'cc:.*?(?=\n\n|\n\w)', ' ', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'bcc:.*?(?=\n\n|\n\w)', ' ', text, flags=re.DOTALL | re.IGNORECASE)
-
-    # Remove message IDs and timestamps
     text = re.sub(r'message-id:.*', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'date:.*', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'content-transfer-encoding:.*', ' ', text, flags=re.IGNORECASE)
-
-    # Remove URLs
-    text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', ' ', text)
-
-    # Remove email addresses
+    text = re.sub(r'http[s]?://(?:[a-zA-Z0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', ' ', text)
     text = re.sub(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', ' ', text)
-
-    # Remove special characters and numbers
     text = re.sub(r'[^a-zA-Z\s.,!?-]', ' ', text)
-
-    # Remove excess whitespace
     text = re.sub(r'\s+', ' ', text).strip()
-
     return text
 
 def tokenize_text(text):
     """
-    Purpose: Tokenize text into words and apply lemmatization using spaCy.
+    Tokenize text using spaCy and apply lemmatization.
+    Only tokens that are alphabetic or punctuation are included.
     """
     if not text or pd.isna(text):
         return []
-
-    # processing text with spaCy
     doc = nlp(text)
-
-    # extracting tokens and apply lemmatization
     tokens = [token.lemma_ for token in doc if token.is_alpha or token.is_punct]
-
     return tokens
 
-def preprocess_data(input_path, output_path, max_rows=None):
+def preprocess_data(input_file, output_file, max_rows=None):
     """
-    Preprocess the Enron email dataset.
+    Preprocess the email data:
+      - Read the CSV with a "message" column containing raw email text.
+      - Parse each email to extract headers and plain text content.
+      - Clean and tokenize the subject and content.
+      - Process the email addresses in the From and To fields.
+      - Drop any rows with empty cleaned content.
+      - Return a DataFrame with the columns:
+            To, From, X-To, X-From, content_clean, subject_clean, content_tokens, subject_tokens.
     """
-    # parse the raw email file
-    emails = parse_emails(input_path)
-
-    # convert the list of emails to a DataFrame
-    df = pd.DataFrame(emails)
-
-    # handle missing data
-    df['Subject'] = df['Subject'].fillna('')
-    df['body'] = df['body'].fillna('')
-
-    # limit the number of rows if max_rows is specified
+    # Load the dataset and limit rows if necessary
+    emails_df = pd.read_csv(input_file)
     if max_rows:
-        df = df.head(max_rows)
-
-    print(f"Processing {len(df)} emails")
-
-    # cleaning and tokenizing the subject
-    df['subject_clean'] = df['Subject'].apply(clean_text)
-    df['subject_tokens'] = df['subject_clean'].apply(tokenize_text)
-
-    # cleaning and tokenizing the email body
-    df['body_clean'] = df['body'].apply(clean_text)
-    df['body_tokens'] = df['body_clean'].apply(tokenize_text)
-
-    # selecting all the required columns
-    df = df[['From', 'To', 'subject_clean', 'body_clean', 'subject_tokens', 'body_tokens']]
-
-    # save the processed data
-    print(f"Saving processed data to {output_path}...")
-    df.to_csv(output_path, index=False)
-    print(f"Saved processed data to {output_path}")
-    return df
+        emails_df = emails_df.head(max_rows)
+    print(f"Processing {len(emails_df)} emails")
+    
+    # Parse the raw email messages from the 'message' column
+    messages = list(map(email.message_from_string, emails_df['message']))
+    
+    # Build records from parsed messages
+    records = []
+    for msg in messages:
+        record = {}
+        # Extract header fields; default to empty string if missing
+        record['subject'] = msg['Subject'] if msg['Subject'] is not None else ''
+        record['From'] = msg['From'] if msg['From'] is not None else ''
+        record['To'] = msg['To'] if msg['To'] is not None else ''
+        record['X-To'] = msg['X-To'] if msg['X-To'] is not None else ''
+        record['X-From'] = msg['X-From'] if msg['X-From'] is not None else ''
+        # Extract plain text content
+        record['content'] = get_text_from_email(msg)
+        records.append(record)
+    
+    # Create DataFrame from the records
+    result_df = pd.DataFrame(records)
+    
+    # Process email addresses for From and To fields
+    result_df['From'] = result_df['From'].apply(split_email_addresses)
+    result_df['To'] = result_df['To'].apply(split_email_addresses)
+    
+    # Clean and tokenize the subject and content
+    result_df['subject_clean'] = result_df['subject'].apply(clean_text)
+    result_df['subject_tokens'] = result_df['subject_clean'].apply(tokenize_text)
+    result_df['content_clean'] = result_df['content'].apply(clean_text)
+    result_df['content_tokens'] = result_df['content_clean'].apply(tokenize_text)
+    
+    # Select the desired columns
+    final_df = result_df[['To', 'From', 'X-To', 'X-From', 
+                          'content_clean', 'subject_clean', 
+                          'content_tokens', 'subject_tokens']]
+    
+    # Drop rows with empty cleaned content
+    final_df = final_df[final_df['content_clean'] != ""]
+    
+    # Save the processed DataFrame to CSV
+    final_df.to_csv(output_file, index=False)
+    print(f"Saved processed data to {output_file}")
+    return final_df
 
 if __name__ == "__main__":
     processed_df = preprocess_data("data/emails.csv", "data/filtered.csv", max_rows=1000)
