@@ -15,9 +15,9 @@ def body_chunking_strategy():
         ner_chunking.df_chunking(df, chunk_size, overlap_size, tf_idf_num)
     
     gliner_labeling.gliner_labeling(df)
-    df_output = pd.read_csv('data/body_processing.csv')
+    df_output = pd.read_csv('data/body_processed.csv')
     df_output.drop(['subject_clean', 'content_tokens', 'subject_tokens'], axis=1)
-    df_output.to_csv('data/body_processing.csv')
+    df_output.to_csv('data/body_processed.csv')
     
 
 body_chunking_strategy()

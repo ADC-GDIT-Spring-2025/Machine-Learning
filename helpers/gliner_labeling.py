@@ -1,5 +1,4 @@
 import pandas as pd
-import warnings
 from gliner import GLiNER
 
 df = pd.read_csv('data/filtered.csv')
@@ -43,7 +42,7 @@ def gliner_labeling(df):
     print("***** labeling with gliner *****")
     entity_dicts = df.apply(apply_gliner_labeling, axis=1)
     entities_df = pd.DataFrame(entity_dicts.tolist())
-    pd.concat([df, entities_df], axis=1).to_csv('data/body_processing.csv', index=False)  
+    pd.concat([df, entities_df], axis=1).to_csv('data/body_processed.csv', index=False)  
 
 
 # entity_dicts = df.apply(apply_gliner_labeling, axis=1)
