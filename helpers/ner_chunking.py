@@ -2,9 +2,7 @@ import pandas as pd
 import ast
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-
-df = pd.read_csv('data/filtered.csv')
-
+# df = pd.read_csv('data/filtered.csv')
 """
 calculating tf-idf scores
 """
@@ -35,7 +33,7 @@ def tf_idf_calc(chunks, top_n):
             tf_idf_results.append(top_words)
         except ValueError:
             # handle empty vocabulary
-            print(f"Warning: Empty vocabulary for chunk: '{chunk_text[:50]}...'")
+            # print(f"Warning: Empty vocabulary for chunk: '{chunk_text[:50]}...'")
             tf_idf_results.append([])
             
     return tf_idf_results
@@ -54,12 +52,13 @@ def chunking(text, chunk_size, overlap_size):
         start_idx += (chunk_size - overlap_size)
     return chunks
 
-def df_chunking(chunk_size, overlap_size, top_n):
+def df_chunking(df, chunk_size, overlap_size, top_n):
+    print("***** creating ner chunks *****")
     df['ner_chunks'] = None
     df['tf_idf'] = None
 
     for index, row in df.iterrows():
-        body_text = str(row['body_clean'])
+        body_text = str(row['content_clean'])
         ner_chunk = chunking(body_text, chunk_size, overlap_size)
         tf_idf = tf_idf_calc(ner_chunk, top_n)
         df.at[index, 'ner_chunks'] = ner_chunk
@@ -80,18 +79,19 @@ def chunking_word(text, chunk_size, overlap_size):
         start_idx += (chunk_size - overlap_size)
     return chunks
 
-def df_chunking_word(chunk_size, overlap_size, top_n):
+def df_chunking_word(df, chunk_size, overlap_size, top_n):
+    print("***** creating ner chunks *****")
     df['ner_chunks_word'] = None
     df['tf_idf_word'] = None
 
     for index, row in df.iterrows():
-        body_text = ast.literal_eval(row['body_tokens'])
+        body_text = ast.literal_eval(row['content_tokens'])
         ner_chunk = chunking_word(body_text, chunk_size, overlap_size)
         tf_idf = tf_idf_calc(ner_chunk, top_n)
         df.at[index, 'ner_chunks_word'] = ner_chunk
         df.at[index, 'tf_idf_word'] = tf_idf
 
 
-df_chunking(150, 3, 5)
-df_chunking_word(15, 3, 5)
-df.to_csv('data/emails_with_ner_chunking.csv', index=False)
+# df_chunking(150, 3, 5)
+# df_chunking_word(15, 3, 5)
+# df.to_csv('data/emails_with_ner_chunking.csv', index=False)
