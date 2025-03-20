@@ -59,8 +59,6 @@ def ner_chunking(text, entities, chunk_size, overlap_size):
             while end_idx < len(text) and text[end_idx].isalnum(): 
                 end_idx += 1
 
-        chunk_text = text[start_idx:end_idx]
-
         # making sure named entities aren't split across chunks
         for entity_list in entities.values():
             for entity in entity_list:
@@ -72,7 +70,7 @@ def ner_chunking(text, entities, chunk_size, overlap_size):
                     end_idx = entity_end
 
         # adding chunk and move index
-        chunks.append(text[start_idx:end_idx])
+        chunks.append([text[start_idx:end_idx]])
         start_idx += (chunk_size - overlap_size)
 
     return chunks
@@ -91,7 +89,7 @@ def tf_idf_calc(chunks, top_n):
         vectorizer = TfidfVectorizer(stop_words='english')
 
         try:
-            tf_idf_matrix = vectorizer.fit_transform([chunk])
+            tf_idf_matrix = vectorizer.fit_transform(chunk)
             feature_names = vectorizer.get_feature_names_out()
 
             # getting scores
@@ -115,10 +113,24 @@ def compute_entity_consistency(df):
     for _, row in df.iterrows():
         entities = row['named_entities']
         chunks = row['ner_chunks']
+        retained_count = 0
+        counted_entities = set()
 
         # totalling entity occurrences
         entity_count = sum(len(v) for v in entities.values()) 
-        retained_count = sum(1 for v in entities.values() for ent in v if any(ent in chunk for chunk in chunks))
+        # print(f"entity_count: {entity_count}")
+        for v in entities.values():
+            for ent in v:
+                # print(f"ent: {ent}\n")
+                if ent not in counted_entities:
+                    for chunk in chunks:
+                        # print(f"chunk: {chunk}\n")
+                        if str(ent) in str(chunk):
+                            # print("***** found ent: {ent} ***** \n")
+                            retained_count += 1
+                            counted_entities.add(ent)
+                            break
+        # print(f"retained_count: {retained_count}")
 
         # ECS: % of entities retained in chunks
         ecs = retained_count / entity_count if entity_count > 0 else 0
@@ -156,7 +168,7 @@ def process_dataframe(df, chunk_size, overlap_size, top_n):
     df['ner_chunks'] = df.apply(lambda row: ner_chunking(str(row['content_clean']), row['named_entities'], chunk_size, overlap_size), axis=1)
 
     print("Calculating TF-IDF for Chunks...")
-    df['tf_idf'] = df['ner_chunks'].apply(lambda chunks: tf_idf_calc(chunks, top_n))
+    df['tf_idf'] = df.apply(lambda row: tf_idf_calc(row['ner_chunks'], top_n), axis=1)
 
     print("Computing Entity Consistency Score...")
     df = compute_entity_consistency(df)
@@ -165,7 +177,9 @@ def process_dataframe(df, chunk_size, overlap_size, top_n):
     df = compute_entity_tf_idf_overlap(df)
 
     # saving processed data
+    df.drop(['subject_clean', 'content_tokens', 'subject_tokens'], axis=1, inplace=True)
     df.to_csv('data/emails_with_ner_chunking_evaluated.csv', index=False)
+
 
 
 # Run Processing
