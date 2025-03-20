@@ -11,7 +11,7 @@ labels = ["date", "location", "person", "action", "finance", "legal", "event", "
 
 # potential chunk sizes and overlap sizes for automated testing
 chunk_sizes = [300, 400, 500, 600]
-overlap_size = 100
+overlap_sizes = [100, 150, 200, 250]
 
 results = []
 
@@ -161,7 +161,6 @@ def compute_entity_tf_idf_overlap(df):
 Applying NER-Based Chunking & TF-IDF Scoring to the Dataset
 """
 def process_dataframe(df, chunk_size, overlap_size, top_n):
-
     print(f"Running chunk_size={chunk_size}, overlap={overlap_size}...")
     df['named_entities'] = df.apply(lambda row: apply_gliner_labeling(row, chunk_size), axis=1)
     df['ner_chunks'] = df.apply(lambda row: ner_chunking(str(row['content_clean']), row['named_entities'], chunk_size, overlap_size), axis=1)
@@ -170,22 +169,24 @@ def process_dataframe(df, chunk_size, overlap_size, top_n):
     df = compute_entity_tf_idf_overlap(df)
     avg_ecs = df['entity_consistency_score'].mean()
     avg_overlap = df['entity_tf_idf_overlap_score'].mean()  
-    results.append((chunk_size, avg_ecs, avg_overlap))
-    df.to_csv(f"data/emails_chunk_{chunk_size}.csv", index=False)
+    results.append((chunk_size, overlap_size, avg_ecs, avg_overlap))
+    df.to_csv(f"data/emails_chunk_{chunk_size}_overlap_{overlap_size}.csv", index=False)
 
-# testing multiple chunk sizes and find the best one
+# testing chunk sizes and overlap sizes for the best combo
 for chunk_size in chunk_sizes:
-    process_dataframe(df.copy(), chunk_size, overlap_size, top_n=5)
+    for overlap_size in overlap_sizes:
+        process_dataframe(df.copy(), chunk_size, overlap_size, top_n=5)
 
 # finding the best chunk size based on avg ECS and overlap scores
-results_df = pd.DataFrame(results, columns=["Chunk Size", "Avg ECS", "Avg TF-IDF Overlap"])
+results_df = pd.DataFrame(results, columns=["Chunk Size", "Overlap Size", "Avg ECS", "Avg TF-IDF Overlap"])
 results_df.to_csv("data/chunking_evaluation_results.csv", index=False)
 
 best_config = results_df.sort_values(by=["Avg ECS", "Avg TF-IDF Overlap"], ascending=False).iloc[0]
 best_chunk_size = int(best_config["Chunk Size"])
-print(f"\nBest Chunk Size: {best_chunk_size}")
+best_overlap_size = int(best_config["Overlap Size"])
+print(f"\nBest Chunk Size: {best_chunk_size}, Best Overlap Size: {best_overlap_size}")
 
 # saving the best chunking res
-best_df = pd.read_csv(f"data/emails_chunk_{best_chunk_size}.csv")
+best_df = pd.read_csv(f"data/emails_chunk_{best_chunk_size}_overlap_{best_overlap_size}.csv")
 best_df.to_csv("data/best_chunking_strategy.csv", index=False)
 print("\nBest chunking strategy saved in 'data/best_chunking_strategy.csv'")
