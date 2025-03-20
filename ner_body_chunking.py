@@ -9,35 +9,35 @@ model = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
 
 labels = ["date", "location", "person", "action", "finance", "legal", "event", "product", "organization"]
 
+# potential chunk sizes and overlap sizes for automated testing
+chunk_sizes = [300, 400, 500, 600]
+overlap_size = 100
+
+results = []
+
 """
 Extracting Named Entities with GLiNER
 """
-def apply_gliner_labeling(row):
+def apply_gliner_labeling(row, chunk_size):
     text = str(row['content_clean'])
 
-    chunk_size = 300
     chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
-
     all_entities = []
-    for i, chunk in enumerate(chunks):
-        # print(f"chunk {i}: {chunk} \t {len(chunk)}\n")
+
+    for chunk in chunks:
         try:
             entities = model.predict_entities(chunk, labels, threshold=0.5)
             all_entities.extend(entities)
         except Exception as e:
             print(f"Error processing chunk: {e}")
-        
-    
+            
     entity_dict = {}
     for entity in all_entities:
         entity_type = entity['label']
         entity_text = entity['text']
-
         if entity_type not in entity_dict:
             entity_dict[entity_type] = []
-
         entity_dict[entity_type].append(entity_text)
-
     return entity_dict
 
 
@@ -133,7 +133,7 @@ def compute_entity_consistency(df):
         # print(f"retained_count: {retained_count}")
 
         # ECS: % of entities retained in chunks
-        ecs = retained_count / entity_count if entity_count > 0 else 0
+        ecs = round((retained_count / entity_count), 2) if entity_count > 0 else 0
         entity_scores.append(ecs)
 
     df['entity_consistency_score'] = entity_scores
@@ -150,7 +150,7 @@ def compute_entity_tf_idf_overlap(df):
         tf_idf_terms = set([term for chunk in row['tf_idf'] for term in chunk])
 
         common_terms = entities.intersection(tf_idf_terms)
-        overlap_score = len(common_terms) / len(entities) if len(entities) > 0 else 0
+        overlap_score = round((len(common_terms) / len(entities)),2) if len(entities) > 0 else 0
 
         overlap_scores.append(overlap_score)
 
@@ -161,26 +161,31 @@ def compute_entity_tf_idf_overlap(df):
 Applying NER-Based Chunking & TF-IDF Scoring to the Dataset
 """
 def process_dataframe(df, chunk_size, overlap_size, top_n):
-    print("Extracting Named Entities...")
-    df['named_entities'] = df.apply(apply_gliner_labeling, axis=1)
 
-    print("Creating NER-Based Chunks...")
+    print(f"Running chunk_size={chunk_size}, overlap={overlap_size}...")
+    df['named_entities'] = df.apply(lambda row: apply_gliner_labeling(row, chunk_size), axis=1)
     df['ner_chunks'] = df.apply(lambda row: ner_chunking(str(row['content_clean']), row['named_entities'], chunk_size, overlap_size), axis=1)
-
-    print("Calculating TF-IDF for Chunks...")
     df['tf_idf'] = df.apply(lambda row: tf_idf_calc(row['ner_chunks'], top_n), axis=1)
-
-    print("Computing Entity Consistency Score...")
     df = compute_entity_consistency(df)
-
-    print("Computing Entity-TF-IDF Overlap Score...")
     df = compute_entity_tf_idf_overlap(df)
+    avg_ecs = df['entity_consistency_score'].mean()
+    avg_overlap = df['entity_tf_idf_overlap_score'].mean()  
+    results.append((chunk_size, avg_ecs, avg_overlap))
+    df.to_csv(f"data/emails_chunk_{chunk_size}.csv", index=False)
 
-    # saving processed data
-    df.drop(['subject_clean', 'content_tokens', 'subject_tokens'], axis=1, inplace=True)
-    df.to_csv('data/emails_with_ner_chunking_evaluated.csv', index=False)
+# testing multiple chunk sizes and find the best one
+for chunk_size in chunk_sizes:
+    process_dataframe(df.copy(), chunk_size, overlap_size, top_n=5)
 
+# finding the best chunk size based on avg ECS and overlap scores
+results_df = pd.DataFrame(results, columns=["Chunk Size", "Avg ECS", "Avg TF-IDF Overlap"])
+results_df.to_csv("data/chunking_evaluation_results.csv", index=False)
 
+best_config = results_df.sort_values(by=["Avg ECS", "Avg TF-IDF Overlap"], ascending=False).iloc[0]
+best_chunk_size = int(best_config["Chunk Size"])
+print(f"\nBest Chunk Size: {best_chunk_size}")
 
-# Run Processing
-process_dataframe(df, chunk_size=300, overlap_size=100, top_n=5)
+# saving the best chunking res
+best_df = pd.read_csv(f"data/emails_chunk_{best_chunk_size}.csv")
+best_df.to_csv("data/best_chunking_strategy.csv", index=False)
+print("\nBest chunking strategy saved in 'data/best_chunking_strategy.csv'")
