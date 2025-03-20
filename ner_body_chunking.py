@@ -44,7 +44,6 @@ def apply_gliner_labeling(row, chunk_size):
 """
 Smart Chunking that Avoids Entity Splitting
 """
-
 def ner_chunking(text, entities, chunk_size, overlap_size):
     chunks = []
     start_idx = 0
@@ -70,7 +69,7 @@ def ner_chunking(text, entities, chunk_size, overlap_size):
                     end_idx = entity_end
 
         # adding chunk and move index
-        chunks.append([text[start_idx:end_idx]])
+        chunks.append(text[start_idx:end_idx])
         start_idx += (chunk_size - overlap_size)
 
     return chunks
@@ -89,7 +88,7 @@ def tf_idf_calc(chunks, top_n):
         vectorizer = TfidfVectorizer(stop_words='english')
 
         try:
-            tf_idf_matrix = vectorizer.fit_transform(chunk)
+            tf_idf_matrix = vectorizer.fit_transform([chunk])
             feature_names = vectorizer.get_feature_names_out()
 
             # getting scores
@@ -170,7 +169,7 @@ def process_dataframe(df, chunk_size, overlap_size, top_n):
     avg_ecs = df['entity_consistency_score'].mean()
     avg_overlap = df['entity_tf_idf_overlap_score'].mean()  
     results.append((chunk_size, overlap_size, avg_ecs, avg_overlap))
-    df.to_csv(f"data/emails_chunk_{chunk_size}_overlap_{overlap_size}.csv", index=False)
+    df.to_csv(f"data/chunking_tests/emails_chunk_{chunk_size}_overlap_{overlap_size}.csv", index=False)
 
 # testing chunk sizes and overlap sizes for the best combo
 for chunk_size in chunk_sizes:
@@ -187,6 +186,6 @@ best_overlap_size = int(best_config["Overlap Size"])
 print(f"\nBest Chunk Size: {best_chunk_size}, Best Overlap Size: {best_overlap_size}")
 
 # saving the best chunking res
-best_df = pd.read_csv(f"data/emails_chunk_{best_chunk_size}_overlap_{best_overlap_size}.csv")
+best_df = pd.read_csv(f"data/chunking_tests/emails_chunk_{best_chunk_size}_overlap_{best_overlap_size}.csv")
 best_df.to_csv("data/best_chunking_strategy.csv", index=False)
 print("\nBest chunking strategy saved in 'data/best_chunking_strategy.csv'")
