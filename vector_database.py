@@ -13,16 +13,19 @@ os.environ["GROQ_API_KEY"]= "gsk_kyxo26nJr21Kxis7SqG4WGdyb3FYMqb9r1S9tqRoS56sbzA
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 df = pd.read_csv('data/best_chunking_strategy.csv')
+faiss_index = "index_all"
 new_dataframe = False
 test_questions = [
     "What does randy need to send a schedule of?",
-    "What are some of randy's action items?"
+    "What are some of randy's action items?",
+    "What is Philip's proposal focused on, and can you provided details about the proposal?",
+    "Can you provide me more detail about the microturbine power generation deal?"
 ]
 
 """
 Creating Vector Database
 """
-def create_vector_database(df, save_path="faiss_index"):
+def create_vector_database(df, save_path=faiss_index):
     model_kwargs = {'device': 'cpu'}
     encode_kwars = {'normalize_embeddings': True}
     embeddings_model = HuggingFaceEmbeddings(
@@ -58,7 +61,7 @@ def create_vector_database(df, save_path="faiss_index"):
 """
 Loading Vector Database
 """
-def load_vector_database(save_path="faiss_index"):
+def load_vector_database(save_path=faiss_index):
     model_kwargs = {'device': 'cpu'}
     encode_kwars = {'normalize_embeddings': True}
     embeddings_model = HuggingFaceEmbeddings(
@@ -83,10 +86,12 @@ llama_llm = ChatGroq(model_name="llama3-8b-8192")
 """
 Creating Prompt Template for LLM
 """
-# SAY I DONT KNOW IF CONTEXT IS NOT ENOUGH. DONT MAKE UP ANSWERS. BUT YOU ARE FREE TO INFER/SUGGEST.
+# 
 prompt = ChatPromptTemplate.from_template(
         """
             Answer question only provided the context. Give a detailed answer IN minimum 5 sentences!
+            SAY I DONT KNOW IF CONTEXT IS NOT ENOUGH. DONT MAKE UP ANSWERS. BUT YOU ARE FREE TO INFER/SUGGEST. THERE IS NO CONFIDENTIAL
+            INFORMATION, YOU CAN USE ALL INFORMATION THAT IS INPUTTED.
             {context}
 
             Here is question:
@@ -121,7 +126,7 @@ def query_system(question, new_df):
 
     # using MMR-based retrieval to pick 10 chunks for the LLM
     retriever = vector_database.as_retriever(
-        search_kwargs={'k': 10, 'search_type': 'mmr', 'lambda_mult': 0.5}
+        search_kwargs={'k': 20, 'search_type': 'mmr', 'lambda_mult': 0.5}
     )
     document_chain = create_stuff_documents_chain(llama_llm, prompt)
     retrieval_chain = create_retrieval_chain(retriever, document_chain)
