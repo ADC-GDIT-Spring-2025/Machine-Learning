@@ -4,241 +4,388 @@ import pandas as pd
 df = pd.read_csv("data/emails.csv")
 
 # %%
-VECTOR_DB_NAME = "email_faiss_normalized_e5"
+VECTOR_DB_NAME = "emails_e5_qdrant"
 
 # %%
+from collections import defaultdict
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_core.documents import Document
-import torch
-from gliner import GLiNER
 import numpy as np
 import re
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import List, Dict, Any, Optional
+from gliner import GLiNER
 
 class EnhancedSemanticChunker(SemanticChunker):
-    """Enhanced Semantic Chunker with NER and metadata enrichment.
-    
-    This chunker extends the SemanticChunker with:
-    1. Controllable overlap percentage between chunks
-    2. Named Entity Recognition using GLiNER
-    3. Metadata enrichment for each chunk
+    """Enhanced Semantic Chunker with sentence-level overlap and NER-aware chunking.
+
+    This chunker extends the basic SemanticChunker with advanced features:
+    1. Controllable sentence overlap between chunks for context continuity
+    2. NER-aware chunk boundaries using GLiNER to preserve entity mentions
+    3. Formatted entity metadata enrichment for better retrieval
+
+    The chunker works by:
+    - Finding semantically coherent boundaries using embeddings
+    - Detecting entities to prevent splitting in the middle of important entities
+    - Adding controlled overlap between chunks to maintain context
+    - Enriching chunks with entity information for better retrieval
     """
-    
+
     def __init__(
         self,
         embeddings: Any,
+        gliner_model: GLiNER,
         breakpoint_threshold_type: str = "percentile",
         breakpoint_threshold_amount: int = 95,
         min_chunk_size: int = 5,
         max_chunk_size: Optional[int] = None,
-        overlap_percentage: float = 0.15,
-        ner_model: Optional[Any] = None,
-        ner_labels: Optional[List[str]] = None,
-        metadata_extractor: Optional[Callable] = None,
+        overlap_sentences: int = 1,
     ):
         """Initialize the enhanced semantic chunker.
-        
+
         Args:
-            embeddings: The embeddings to use for semantic similarity.
-            breakpoint_threshold_type: How to determine breakpoints ('percentile' or 'standard_deviation').
-            breakpoint_threshold_amount: The threshold amount for breakpoints.
-            min_chunk_size: Minimum chunk size in sentences.
-            max_chunk_size: Maximum chunk size in sentences (not used in parent class).
-            overlap_percentage: Percentage of overlap between chunks (0.0 to 1.0).
-            ner_model: GLiNER model for named entity recognition.
-            ner_labels: Labels to extract with NER model.
-            metadata_extractor: Function to extract metadata from text.
+            embeddings: The embeddings model to use for semantic similarity calculation.
+            gliner_model: A loaded GLiNER model instance for named entity recognition.
+            breakpoint_threshold_type: Method to determine semantic breakpoints 
+                ('percentile' or 'standard_deviation').
+            breakpoint_threshold_amount: Threshold value for determining breakpoints 
+                (higher = fewer chunks).
+            min_chunk_size: Minimum number of sentences per chunk.
+            max_chunk_size: Maximum number of sentences per chunk (not used in parent class).
+            overlap_sentences: Number of sentences to include before and after each chunk for context.
         """
+        # Initialize the parent SemanticChunker
+        # This provides the basic semantic chunking functionality
         super().__init__(
             embeddings=embeddings,
             breakpoint_threshold_type=breakpoint_threshold_type,
             breakpoint_threshold_amount=breakpoint_threshold_amount,
             min_chunk_size=min_chunk_size,
         )
-        self.max_chunk_size = max_chunk_size  # Store as attribute but don't pass to parent
-        self.overlap_percentage = overlap_percentage
-        self.ner_model = ner_model
-        self.ner_labels = ner_labels or ["date", "location", "person", "organization", "event"]
-        self.metadata_extractor = metadata_extractor
+        # Store additional configuration parameters
+        self.max_chunk_size = max_chunk_size  # Maximum chunk size (for future implementation)
+        self.overlap_sentences = overlap_sentences  # How many sentences to overlap between chunks
+        self.gliner_model = gliner_model  # GLiNER model for entity recognition
+        # Entity types to extract with GLiNER
+        # This comprehensive list covers most entities in business emails
+        self.ner_labels = ["date", "location", "person", "action", "finance", "legal", "event", "product", "organization"]
+
+    def _split_sentences(self, text: str) -> List[str]:
+        """Split text into sentences using regex.
         
-        # Initialize NER model if not provided
-        if self.ner_model is None and torch.cuda.is_available():
-            self.ner_model = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
-            self.ner_model.to(torch.device('cuda'))
-        elif self.ner_model is None:
-            self.ner_model = GLiNER.from_pretrained("urchade/gliner_medium-v2.1")
-            self.ner_model.to(torch.device('cpu'))
-    
-    def _extract_entities(self, text: str) -> Dict[str, Any]:
-        """Extract entities from text using GLiNER.
+        A utility method to break text into sentences based on common sentence
+        ending patterns (.!?). This is used both for chunking and overlap management.
         
-        Handles long texts by splitting into smaller chunks that fit within 
-        GLiNER's maximum context window (384 tokens).
+        Args:
+            text: Input text to split into sentences
+            
+        Returns:
+            List of sentences extracted from the text
         """
-        if not self.ner_model:
-            return {}
+        # Basic sentence splitter using regex; can replace with spaCy or nltk if needed
+        # Splits on period, exclamation, or question mark followed by a space
+        # Also strips whitespace from each sentence and filters out empty strings
+        return [s.strip() for s in re.split(r'(?<=[.!?]) +', text) if s.strip()]
+
+    def _get_ner_spans(self, text: str) -> List[Dict[str, int]]:
+        """Extract named entity spans and information from text.
+        
+        A core method for entity-aware chunking. It extracts entity locations and data
+        to prevent entities from being split across chunk boundaries.
+        
+        For shorter texts (<300 words), processes the entire text at once.
+        For longer texts, delegates to _get_ner_spans_long method.
+        
+        Args:
+            text: Input text to extract entities from
             
+        Returns:
+            Tuple containing (entity_spans, entity_objects)
+        """
         try:
-            # Initialize entity dictionary
-            entity_dict = {}
-            
-            # Split long text into manageable chunks (roughly 384 tokens each)
-            # Using a simple approach of ~100 words per chunk (~300-350 tokens typically)
-            words = text.split()
-            chunk_size = 100  # Approximate number of words per chunk
-            
-            # If text is short enough, process it directly
-            if len(words) <= chunk_size:
-                entities = self.ner_model.predict_entities(text, labels=self.ner_labels, threshold=0.5)
-                
-                # Group entities by type
-                for entity in entities:
-                    entity_type = entity.get('label', 'unknown')
-                    if entity_type not in entity_dict:
-                        entity_dict[entity_type] = []
-                    entity_dict[entity_type].append(entity.get('text', ''))
-            
-            # For longer texts, process in chunks and combine results
+            # For shorter texts, process directly with GLiNER
+            if len(text.split()) <= 300:
+                # GLiNER model processes text and returns entity information
+                entities = self.gliner_model.predict_entities(text, self.ner_labels, threshold=0.5)
+                # Extract start/end character positions for each entity (for boundary adjustment)
+                return [(e['start'], e['end']) for e in entities if 'start' in e and 'end' in e], entities
+            # For longer texts, use the chunking approach to avoid context limitations
             else:
-                chunks = []
-                for i in range(0, len(words), chunk_size):
-                    chunk = " ".join(words[i:i+chunk_size])
-                    chunks.append(chunk)
-                
-                # Process each chunk
-                for chunk in chunks:
-                    chunk_entities = self.ner_model.predict_entities(chunk, labels=self.ner_labels, threshold=0.5)
-                    
-                    # Add to combined results
-                    for entity in chunk_entities:
-                        entity_type = entity.get('label', 'unknown')
-                        if entity_type not in entity_dict:
-                            entity_dict[entity_type] = []
-                        entity_dict[entity_type].append(entity.get('text', ''))
-            
-            return entity_dict
-            
+                return self._get_ner_spans_long(text)
         except Exception as e:
-            print(f"NER Error: {e}")
-            return {}
-    
+            # Log any errors in entity extraction but continue processing
+            print(f"NER extraction error: {e}")
+            return []
+        
+    def _get_ner_spans_long(self, text: str) -> List[Dict[str, int]]:
+        """Extract named entity spans from long text by chunking.
+        
+        Handles texts longer than GLiNER's context window by splitting into
+        smaller chunks, processing each chunk, and combining the results.
+        
+        Args:
+            text: Long input text to extract entities from
+            
+        Returns:
+            Tuple containing (entity_spans, entity_objects)
+        """
+        try:
+            # Maximum tokens GLiNER can handle at once
+            # This prevents context window limitation issues
+            max_tokens = 300
+            sentences = self._split_sentences(text)
+            chunks = []
+            current_chunk = []
+            current_length = 0
+
+            # Split text into chunks of appropriate size by sentences
+            # This preserves sentence boundaries when chunking for NER
+            for sentence in sentences:
+                tokens = sentence.split()
+                # If adding this sentence would exceed max tokens, start a new chunk
+                if current_length + len(tokens) > max_tokens:
+                    chunks.append(" ".join(current_chunk))
+                    current_chunk = tokens
+                    current_length = len(tokens)
+                else:
+                    # Otherwise add to current chunk
+                    current_chunk.extend(tokens)
+                    current_length += len(tokens)
+                    
+            # Add the last chunk if not empty
+            if current_chunk:
+                chunks.append(" ".join(current_chunk))
+
+            # Process each chunk for entities and collect results
+            all_entities = []
+            all_spans = []
+            for chunk in chunks:
+                try:
+                    entities = self.gliner_model.predict_entities(chunk, self.ner_labels, threshold=0.5)
+                    spans = [(e['start'], e['end']) for e in entities if 'start' in e and 'end' in e]
+                    all_spans.extend(spans)
+                    all_entities.extend(entities)
+                except Exception as e:
+                    # Log errors for individual chunks but continue processing
+                    print(f"NER extraction error in chunk: {e}")
+
+            return all_spans, all_entities
+
+        except Exception as e:
+            print(f"NER extraction error: {e}")
+            return []
+
+        
+    def _format_gliner_entities(self, entities: list) -> str:
+        """Format extracted entities into a human-readable text description.
+        
+        Creates a natural language description of entities found in the text,
+        grouped by entity type, which can be used to enrich document content
+        or metadata for improved retrieval.
+        
+        Args:
+            entities: List of entity objects from GLiNER
+            
+        Returns:
+            Formatted entity description string
+        """
+        if not entities:
+            return ""
+        
+        # Group entities by type to create more readable descriptions
+        grouped = defaultdict(list)
+        for ent in entities:
+            label = ent["label"].lower()
+            text = ent["text"].strip()
+            # Avoid duplicates within each entity type
+            if text not in grouped[label]:
+                grouped[label].append(text)
+
+        # Format each entity type into a natural language phrase
+        # This creates human-readable entity summaries for each type
+        phrases = []
+        for label, items in grouped.items():
+            readable_items = ", ".join(items)
+            # Format differently based on entity type for better readability
+            if label == "person":
+                phrases.append(f"people mentioned include {readable_items}")
+            elif label == "date":
+                phrases.append(f"dates mentioned include {readable_items}")
+            elif label == "location":
+                phrases.append(f"locations mentioned include {readable_items}")
+            elif label == "finance":
+                phrases.append(f"financial terms include {readable_items}")
+            elif label == "organization":
+                phrases.append(f"organizations mentioned include {readable_items}")
+            elif label == "product":
+                phrases.append(f"products or services mentioned include {readable_items}")
+            elif label == "event":
+                phrases.append(f"events mentioned include {readable_items}")
+            elif label == "legal":
+                phrases.append(f"legal terms mentioned include {readable_items}")
+            elif label == "action":
+                phrases.append(f"actions or verbs include {readable_items}")
+            else:
+                phrases.append(f"{label}s mentioned include {readable_items}")
+
+        # Combine all phrases into a single description
+        # This forms a comprehensive entity summary for the chunk
+        return "This passage contains " + "; ".join(phrases) + ". "
+
+
+    def _adjust_chunk_boundaries(self, text: str, chunks: List[str], spans: List[tuple]) -> List[str]:
+        """Adjust chunk boundaries to prevent splitting entities.
+        
+        Ensures that named entities aren't split across chunks by extending
+        chunk boundaries to fully include any entity that would be split.
+        This is a key innovation in this chunker - preserving entity integrity.
+        
+        Args:
+            text: The full source text
+            chunks: List of initially determined chunks
+            spans: List of entity spans (start, end) to preserve
+            
+        Returns:
+            List of adjusted chunks with preserved entity boundaries
+        """
+        adjusted_chunks = []
+        for chunk in chunks:
+            # Find the position of this chunk in the original text
+            start_idx = text.find(chunk)
+            end_idx = start_idx + len(chunk)
+
+            # Extend chunk boundaries to include any overlapping entity
+            # This ensures no entity is split across chunk boundaries
+            for ent_start, ent_end in spans:
+                # If an entity overlaps with this chunk boundary
+                if start_idx < ent_end and end_idx > ent_start:
+                    # Extend the chunk to fully include the entity
+                    start_idx = min(start_idx, ent_start)
+                    end_idx = max(end_idx, ent_end)
+
+            # Extract the adjusted chunk from the text
+            adjusted_chunk = text[start_idx:end_idx].strip()
+            adjusted_chunks.append(adjusted_chunk)
+
+        return adjusted_chunks
+
     def create_documents(
-        self, 
-        texts: List[str], 
+        self,
+        texts: List[str],
         metadatas: Optional[List[Dict[str, Any]]] = None
     ) -> List[Document]:
-        """Create documents with semantic chunking, overlap, and NER enrichment.
+        """Create LangChain Document objects from texts with enhanced chunking.
+        
+        This method:
+        1. Splits texts into semantic chunks
+        2. Adjusts chunk boundaries to preserve entities
+        3. Adds sentence overlap for context continuity
+        4. Enriches metadata with entity information
+        5. Returns Document objects ready for vectorization
         
         Args:
-            texts: List of texts to chunk.
-            metadatas: Optional list of metadata dictionaries for each text.
+            texts: List of input texts to process
+            metadatas: Optional list of metadata dictionaries for each text
             
         Returns:
-            List of Document objects with enriched metadata.
+            List of LangChain Document objects with enhanced content and metadata
         """
+        # Initialize empty metadata if none provided
         if metadatas is None:
             metadatas = [{} for _ in texts]
-            
+
         all_docs = []
-        
+
+        # Process each text with its corresponding metadata
         for i, (text, metadata) in enumerate(zip(texts, metadatas)):
-            # First get semantic chunks without overlap
-            chunks = self.split_text(text)
+            # Split text into sentences
+            sentences = self._split_sentences(text)
+            # Create mapping from sentence to its index for quick lookup
+            sentence_to_idx = {s: idx for idx, s in enumerate(sentences)}
             
-            # Calculate overlap size based on average chunk length
-            if chunks:
-                avg_chunk_size = sum(len(chunk.split()) for chunk in chunks) / len(chunks)
-                overlap_size = int(avg_chunk_size * self.overlap_percentage)
-            else:
-                overlap_size = 0
+            # Extract named entities
+            spans, entities = self._get_ner_spans(text)
             
-            # Extract custom metadata if extractor is provided
-            if self.metadata_extractor and callable(self.metadata_extractor):
-                try:
-                    custom_metadata = self.metadata_extractor(text)
-                    # Ensure custom_metadata is a dictionary before updating
-                    if isinstance(custom_metadata, dict):
-                        metadata.update(custom_metadata)
-                    else:
-                        print(f"Warning: custom_metadata is not a dictionary. Type: {type(custom_metadata)}")
-                except Exception as e:
-                    print(f"Metadata extraction error: {str(e)}")
+            # Get initial semantic chunks using parent class method
+            raw_chunks = self.split_text(text)
             
-            # Create overlapping chunks with enriched metadata
-            for j, chunk in enumerate(chunks):
-                # Add overlap from previous chunk
-                if j > 0 and overlap_size > 0:
-                    prev_words = chunks[j-1].split()
-                    if len(prev_words) > overlap_size:
-                        overlap_text = " ".join(prev_words[-overlap_size:])
-                        chunk = overlap_text + " " + chunk
+            # Adjust chunk boundaries to preserve entity mentions
+            adjusted_chunks = self._adjust_chunk_boundaries(text, raw_chunks, spans)
+
+            # Process each adjusted chunk
+            for chunk in adjusted_chunks:
+                # Split the chunk into sentences for overlap processing
+                chunk_sentences = self._split_sentences(chunk)
+
+                # Skip empty chunks
+                if not chunk_sentences:
+                    continue
+
+                # Find original sentence indices for this chunk
+                first_sentence = chunk_sentences[0]
+                last_sentence = chunk_sentences[-1]
+                start_idx = sentence_to_idx.get(first_sentence, 0)
+                end_idx = sentence_to_idx.get(last_sentence, start_idx)
+
+                # Add overlap sentences before and after
+                # This creates continuity between chunks
+                prefix = sentences[max(0, start_idx - self.overlap_sentences):start_idx]
+                suffix = sentences[end_idx + 1:end_idx + 1 + self.overlap_sentences]
+
+                # Combine into final chunk with overlap
+                full_chunk = " ".join(prefix + chunk_sentences + suffix).strip()
                 
-                # Extract entities from this chunk
-                entities = self._extract_entities(chunk)
+                # Add entity information to metadata
+                # This enriches the chunk with structured entity data
+                metadata["entities"] = self._format_gliner_entities(entities)
                 
-                # Create enhanced metadata
-                enhanced_metadata = metadata.copy()
-                enhanced_metadata.update({
-                    "chunk_index": j,
-                    "total_chunks": len(chunks),
-                    "entities": entities,
-                    "has_overlap": j > 0 and overlap_size > 0
-                })
-                
-                # Create document with enhanced content and metadata
+                # Create LangChain Document with prefix, enhanced content and metadata
                 all_docs.append(Document(
-                    page_content=chunk,
-                    metadata=enhanced_metadata
+                    page_content="passage: " + full_chunk,
+                    metadata=metadata
                 ))
-                
+
         return all_docs
-    
+
     def split_documents(self, documents: List[Document]) -> List[Document]:
-        """Split documents with semantic chunking, overlap, and NER enrichment.
+        """Split existing LangChain Documents into smaller chunks.
+        
+        This is a convenience method for processing documents that are
+        already in LangChain Document format.
         
         Args:
-            documents: List of documents to split.
+            documents: List of Documents to split
             
         Returns:
-            List of split documents with enriched metadata.
+            List of split Documents with enhanced features
         """
+        # Extract text and metadata from documents
         texts = [doc.page_content for doc in documents]
         metadatas = [doc.metadata for doc in documents]
+        # Delegate to create_documents method
         return self.create_documents(texts, metadatas)
 
-# %%
-
-print(df.head())  
-print(df.info()) 
-print(df.columns) 
-# %%
-email_texts = df["message"].iloc[:1000].dropna().tolist()
 
 # %%
-df['file'][0]
+email_texts = df["message"].iloc[:500].dropna().tolist()
 
 # %%
 import re
 
 def clean_text(text: str) -> str:
     """
-    Cleans the input text by:
-    - Removing all special characters except @, ., ,, ?, :, ;, -, _, and space.
-    - Replacing multiple spaces with a single space.
-    - Stripping leading and trailing spaces.
+    Clean text while preserving useful characters:
+    - Removes weird/unprintable symbols
+    - Keeps letters, numbers, basic punctuation: @ . , ? : ; ! _ ( ) &
+    - Normalizes whitespace
     """
-    # Keep letters, numbers, email punctuation (such as @, ., ,), and common punctuation for sentences.
-    text = re.sub(r'[^A-Za-z0-9@.,?;:!()&\-_\s]', '', text)  # Allow basic email punctuation and sentence symbols
-    text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with a single space
-    return text.strip()  # Remove leading/trailing spaces
+    # Remove anything not in the allowed set
+    text = re.sub(r"[^A-Za-z0-9@.,?;:!()&\_ ]", '', text)
+    
+    # Normalize whitespace
+    text = re.sub(r"\s+", " ", text)
+    
+    return text.strip()
 
-
-# %%
-from pprint import pprint
-import random
-msg = df['message'][random.randint(0,5000)]
-pprint(msg)
-pprint(clean_text(msg))
 
 # %%
 import faiss
@@ -256,7 +403,6 @@ modelemb = HuggingFaceEmbeddings(
     model_kwargs=model_kwargs,
     encode_kwargs=encode_kwargs,
 )
-
 
 # %%
 import torch
@@ -279,228 +425,102 @@ nlp = spacy.load("en_core_web_sm")
 labels = ["date", "location", "person", "action", "finance", "legal", "event", "product", "organization"]
 
 # ============ Helper Functions ============
-def clean_text(text):
-    text = text.lower()
-    text = re.sub(r'[^a-zA-Z\s.,!?-]', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+from dateutil import parser
 
-def extract_entities_gliner(text, labels):
+def parse_email_date(date_tokens: List[str]) -> str:
+    raw_date_str = " ".join(date_tokens)
     try:
-        entities = gliner_model.predict_entities(text, labels=labels, threshold=0.5)
-        return [e['text'] for e in entities]
+        parsed = parser.parse(raw_date_str, fuzzy=True)
+        return parsed.strftime("%m-%d-%Y")
     except Exception as e:
-        print("GLiNER Error:", e)
-        return []
+        print(f"Date parse error: {e}")
+        return "unknown"
+
 
 def extract_email_metadata(msg):
-    """Extract metadata from email message text.
-    
-    Args:
-        msg (str): The email message text
-        
-    Returns:
-        dict: A dictionary containing extracted metadata fields
-    """
+    split_msg = msg.split()
+    metadata = {}
     try:
-        # Check if input is valid
-        if not isinstance(msg, str) or not msg.strip():
-            return {}
-            
-        split_msg = msg.split()
-        metadata = {}
-        
-        # Find sender
-        try:
-            from_index = split_msg.index("From:")
-            if from_index + 1 < len(split_msg):
-                metadata['sender'] = split_msg[from_index + 1]
-            else:
-                metadata['sender'] = ""
-        except (ValueError, IndexError):
-            metadata['sender'] = ""
-        
-        # Find recipients
+        metadata['sender'] = split_msg[split_msg.index("From:") + 1]
         recips = []
         try:
-            to_start = split_msg.index("To:") + 1
-            subject_index = split_msg.index("Subject:")
-            for idx in range(to_start, subject_index):
-                if idx < len(split_msg):
-                    recips.append(split_msg[idx])
-        except (ValueError, IndexError):
-            try:
-                to_start = split_msg.index("X-To:") + 1
-                subject_index = split_msg.index("Subject:")
-                for idx in range(to_start, subject_index):
-                    if idx < len(split_msg):
-                        recips.append(split_msg[idx])
-            except (ValueError, IndexError):
-                pass
-                
+            for idx in range(split_msg.index("To:") + 1, split_msg.index("Subject:")):
+                recips.append(split_msg[idx])
+        except:
+            for idx in range(split_msg.index("X-To:") + 1, split_msg.index("Subject:")):
+                recips.append(split_msg[idx])
         metadata['recipient'] = " ".join(recips)
-        
-        # Find date
-        try:
-            date_index = split_msg.index("Date:") + 1
-            if date_index < len(split_msg):
-                metadata['date'] = " ".join(split_msg[date_index: min(date_index + 6, len(split_msg))])
-            else:
-                metadata['date'] = ""
-        except (ValueError, IndexError):
-            metadata['date'] = ""
-            
-        # Find subject
-        try:
-            subject_start = split_msg.index("Subject:") + 1
-            try:
-                mime_index = split_msg.index("Mime-Version:")
-                metadata['subject'] = " ".join(split_msg[subject_start:mime_index])
-            except (ValueError, IndexError):
-                # Take next 10 words as subject if no Mime-Version found
-                metadata['subject'] = " ".join(split_msg[subject_start:min(subject_start+10, len(split_msg))])
-        except (ValueError, IndexError):
-            metadata['subject'] = ""
-        
-        # Find main content start
-        try:
-            msg_start = split_msg.index("X-FileName:") + 3
-            if msg_start < len(split_msg):
-                metadata['content_start_index'] = msg_start
-            else:
-                metadata['content_start_index'] = 0
-        except (ValueError, IndexError):
-            metadata['content_start_index'] = 0
-            
-        return metadata
+        metadata['date'] = parse_email_date(split_msg[split_msg.index("Date:") + 1: split_msg.index("Date:") + 7])
+        metadata['subject'] = " ".join(split_msg[split_msg.index("Subject:") + 1:split_msg.index("Mime-Version:")])
     except Exception as e:
-        print(f"Metadata extraction error: {str(e)}")
-        return {}
+        print("Metadata extraction error:", e)
+    return metadata, split_msg
 
 # %%
+from pprint import pprint
+import random
+msg = df['message'][random.randint(0,500)]
+print(msg)
+print(clean_text(msg))
+
 # Example usage of our new EnhancedSemanticChunker
 enhanced_chunker = EnhancedSemanticChunker(
     embeddings=modelemb,
     breakpoint_threshold_type="percentile",
-    breakpoint_threshold_amount=5,  # More aggressive chunking
-    min_chunk_size=3,
-    overlap_percentage=0.15,  # 15% overlap between chunks
-    ner_model=gliner_model,
-    ner_labels=labels,
-    metadata_extractor=extract_email_metadata,
+    breakpoint_threshold_amount=50,  
+    min_chunk_size=5,
+    overlap_sentences=1,  
+    gliner_model=gliner_model
 )
+
 
 # Test the enhanced chunker on a sample email
 sample_email = msg
-email_metadata = extract_email_metadata(sample_email)
+metadata, split_msg = extract_email_metadata(sample_email)
+msg_start = split_msg.index("X-FileName:")
+full_content = clean_text(" ".join(split_msg[msg_start + 3:]))
+# print(full_content)
+# Create document with the enhanced chunker
+documents = enhanced_chunker.create_documents(
+    texts=[full_content],
+    metadatas=[metadata]
+)
 
-if 'content_start_index' in email_metadata:
-    split_msg = sample_email.split()
-    msg_start = email_metadata['content_start_index']
-    full_content = clean_text(" ".join(split_msg[msg_start:]))
-    
-    # Create document with the enhanced chunker
-    documents = enhanced_chunker.create_documents(
-        texts=[full_content],
-        metadatas=[email_metadata]
-    )
-    
-    print(f"Created {len(documents)} enhanced chunks")
-    for i, doc in enumerate(documents[:2]):  # Show first two chunks only
-        print(f"\n--- Chunk {i+1}/{len(documents)} ---")
-        print(f"Content: {doc.page_content}...")
-        print(f"Metadata: {doc.metadata}")
-else:
-    print("Error extracting email metadata")
+print(f"Created {len(documents)} enhanced chunks")
+for i, doc in enumerate(documents):  
+    print(f"\n--- Chunk {i+1}/{len(documents)} ---")
+    print(f"Content: {doc.page_content}")
+    print(f"Metadata: {doc.metadata}")
 
 # %%
 len(email_texts)
 
 # %%
-import re
+from langchain_core.documents import Document
+import pprint
 
-def clean_text(text: str) -> str:
-    """
-    Cleans the input text by:
-    - Removing all special characters except @, ., ,, ?, :, ;, -, _, and space.
-    - Replacing multiple spaces with a single space.
-    - Stripping leading and trailing spaces.
-    """
-    # Keep letters, numbers, email punctuation (such as @, ., ,), and common punctuation for sentences.
-    text = re.sub(r'[^A-Za-z0-9@.,?;:!()&\_\s]', '', text)  # Allow basic email punctuation and sentence symbols
-    text = re.sub(r'\s+', ' ', text)  # Replace multiple spaces with a single space
-    return text.strip()  # Remove leading/trailing spaces
 
-# %%
-# Use our enhanced chunker to process all emails
-async def process_emails_with_enhanced_chunker():
-    from langchain_core.documents import Document
-    from tqdm.notebook import tqdm
-    import asyncio
-    from concurrent.futures import ThreadPoolExecutor
-    
-    enhanced_docs = []
-    
-    # Process emails in batches using ThreadPoolExecutor
-    def process_batch(batch_emails):
-        batch_docs = []
-        for email in batch_emails:
-            try:
-                metadata = extract_email_metadata(email)
-                if 'content_start_index' in metadata:
-                    split_msg = email.split()
-                    msg_start = metadata['content_start_index']
-                    full_content = clean_text(" ".join(split_msg[msg_start:]))
-                    
-                    # Create document with enhanced chunker
-                    docs = enhanced_chunker.create_documents(
-                        texts=[full_content],
-                        metadatas=[metadata]
-                    )
-                    
-                    # Add prefix to page content if needed
-                    for doc in docs:
-                        if not doc.page_content.startswith("passage:"):
-                            doc.page_content = "passage: " + doc.page_content
-                    
-                    batch_docs.extend(docs)
-            except Exception as e:
-                print(f"Error processing email: {str(e)}")
-        
-        return batch_docs
-    
-    # Process in batches of 50 emails
-    batch_size = 50
-    batches = [email_texts[i:i+batch_size] for i in range(0, len(email_texts), batch_size)]
-    
-    loop = asyncio.get_event_loop()
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        tasks = []
-        for batch in batches:
-            tasks.append(loop.run_in_executor(executor, process_batch, batch))
-            
-        for future in tqdm(asyncio.as_completed(tasks), total=len(tasks)):
-            batch_result = await future
-            enhanced_docs.extend(batch_result)
-    
-    return enhanced_docs
+def create_docslist():
+    docslist = []
+    for i, sample_email in enumerate(email_texts):
+        print(f"Processing email {i+1}/{len(email_texts)}")
+        metadata, split_msg = extract_email_metadata(sample_email)
+        msg_start = split_msg.index("X-FileName:")
+        full_content = clean_text(" ".join(split_msg[msg_start + 3:]))
+        # print(full_content)
+        # Create document with the enhanced chunker
+        documents = enhanced_chunker.create_documents(
+            texts=[full_content],
+            metadatas=[metadata]
+        )
 
-# Replace the existing processing with our enhanced version
-# We need to run this in an async context, which Jupyter supports
-# For non-Jupyter environments, you'd wrap this in an async function and use asyncio.run()
-import asyncio
-# Create a function to execute the async code
-def run_async_process():
-    """Run the async processing of emails and return the documents"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop.run_until_complete(process_emails_with_enhanced_chunker())
-
-# Execute the processing
-enhanced_docslist = run_async_process()
-
-# %%
-db = FAISS.from_documents(enhanced_docslist[:1], modelemb)
+        print(f"Created {len(documents)} enhanced chunks")
+        for i, doc in enumerate(documents):  
+            print(f"\n--- Chunk {i+1}/{len(documents)} ---")
+            print(f"Content: {doc.page_content}")
+            print(f"Metadata: {doc.metadata}")
+        docslist.extend(documents)
+    return docslist
 
 # %%
 import numpy as np
@@ -519,49 +539,81 @@ def l2_normalize(embeddings: np.ndarray) -> np.ndarray:
         norm[norm == 0] = 1  # avoid division by zero
         return embeddings / norm
 
+# docslist = create_docslist()
+
+# # Extract text from Document objects
+# docs_texts = [doc.page_content for doc in docslist]  # Get only text content
+
+# # Generate embeddings for each text
+# embeddings = modelemb.embed_documents(docs_texts)  # List[List[float]]
+
+# embeddings = l2_normalize(np.array(embeddings))  # Ensure it's NumPy and normalized
+
+
+
+# %%
+# np.save("embeddings.npy",embeddings)
+# # Create (text, embedding) pairs for FAISS
+# text_embedding_pairs = list(zip(docs_texts, embeddings))  # Convert np.array to list
+
+# from langchain_qdrant import Qdrant
+
+# from qdrant_client import QdrantClient
+# from qdrant_client.http.models import Distance, VectorParams
+
+
+
+# qdrant = Qdrant.from_documents(
+#     docslist,
+#     modelemb,
+#     path="qdrant_db",
+#     collection_name="my_documents",
+# )
+
 # %%
 len(email_texts)
 
 # %%
-len(enhanced_docslist)
+# len(docslist)
 
 # %%
 from langchain_community.vectorstores import FAISS
-from tqdm.asyncio import tqdm_asyncio  # Better tqdm for async
+# from tqdm import tqdm  # Sync version of tqdm, works better with notebooks
+# import asyncio
 
-async def batch_insert(db, docslist, batch_size=40):
-    tasks = []
+# # Define batch insert function
+# async def batch_insert(db, docslist, batch_size=40):
+#     tasks = []
     
-    for i in range(0, len(docslist), batch_size):
-        batch_docs = docslist[i : i + batch_size]
-        batch_id = i // batch_size
+#     for i in range(0, len(docslist), batch_size):
+#         batch_docs = docslist[i : i + batch_size]
+#         batch_id = i // batch_size
 
-        async def insert_batch(batch, batch_id=batch_id):
-            await db.aadd_documents(batch)
-            print(f"Batch {batch_id} added ({len(batch)} docs).")
+#         async def insert_batch(batch, batch_id=batch_id):
+#             await db.aadd_documents(batch)
+#             # print(f"Batch {batch_id} added ({len(batch)} docs).")
         
-        tasks.append(insert_batch(batch_docs))
+#         tasks.append(insert_batch(batch_docs))  # Appending coroutine, but no args here!
 
-    # Run all batch insertions concurrently with tqdm
-    for coro in tqdm_asyncio.as_completed(tasks, total=len(tasks)):
-        await coro
+#     # Run all batch insertions concurrently with tqdm
+#     for coro in tqdm(tasks, total=len(tasks)):
+#         await coro
 
-# Execute batch insert asynchronously
-def run_batch_insert():
-    """Run the batch insert asynchronously and return when complete"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop.run_until_complete(batch_insert(db, enhanced_docslist, batch_size=40))
+# # Execute batch insert asynchronously
+# async def run_batch_insert(db, docslist):
+#     """Run the batch insert asynchronously and return when complete"""
+#     await batch_insert(db, docslist, batch_size=40)
 
-# Execute the batch insert
-run_batch_insert()
+# # Assuming `db` and `enhanced_docslist` are defined earlier, run the batch insert
+# await run_batch_insert(db, do)
 
-# %%
-db.save_local(VECTOR_DB_NAME + "_enhanced")
-print("Enhanced FAISS index updated and saved")
 
 # %%
-db = FAISS.load_local(VECTOR_DB_NAME + "_enhanced", modelemb, allow_dangerous_deserialization=True)
+# db.save_local(VECTOR_DB_NAME + "_enhanced")
+# print("Enhanced FAISS index updated and saved")
+
+# %%
+db = FAISS.load_local("email_faiss_normalized_e5_enhanced",modelemb,allow_dangerous_deserialization=True)
 
 # %%
 model = modelemb
@@ -570,17 +622,20 @@ model = modelemb
 from initialize_groq import init_groq
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains.retrieval import create_retrieval_chain
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
 prompt = ChatPromptTemplate.from_template(
         """
-            Answer question only provided the context. Give a detailed answer IN minimum 5 sentences!
-            SAY I DONT KNOW IF CONTEXT IS NOT ENOUGH. DONT MAKE UP ANSWERS. BUT YOU ARE FREE TO INFER/SUGGEST.
+            Answer question based on only the context provided. 
             {context}
 
             Here is question:
             {input}
         """
+)
+
+document_prompt = PromptTemplate.from_template(
+    "Source: {sender}\nDate: {date}\n Recipients: {recipient}\nSubject: {subject}\nEntities: {entities}\n\nContent: {page_content}"
 )
 
 retriever = db.as_retriever(search_kwargs={'k':20, 'search_type':'mmr','lambda_mult':0.2})
@@ -589,75 +644,191 @@ _, llm = init_groq(model_name="llama-3.3-70b-versatile")
 import random
 from initialize_groq import api_keys
 llm.groq_api_key = random.choice(api_keys)
-document_chain = create_stuff_documents_chain(llm, prompt)
+document_chain = create_stuff_documents_chain(llm, prompt=prompt, document_prompt=document_prompt)
 retrieval_chain = create_retrieval_chain(retriever, document_chain)
 
 # Retrieve Top-K Similar Documents (Initial Broad Search)
-retriever_topk = db.as_retriever(search_kwargs={'k': 20,'fetch_k' : 100, 'search_type': 'similarity'})  # Retrieve more docs first
-
+# retriever_topk = db.as_retriever(search_kwargs={'k': 20,'fetch_k' : 100, 'search_type': 'similarity_s core_threshold','score_threshold':0.75})  # Retrieve more docs first
+retriever_topk = db.as_retriever(search_type="similarity_score_threshold", search_kwargs={'score_threshold':0.1,'k':20})
 # MMR for Diversity (Reduce Redundant Docs)
-retriever_mmr = db.as_retriever(search_kwargs={'k': 20, 'fetch_k' : 100, 'search_type': 'mmr'})  
+retriever_mmr = db.as_retriever(search_type="mmr", search_kwargs={'lambda_mult': 0})  
 
 # Create the Hybrid Retrieval Pipeline
 retrieval_chain_topk = create_retrieval_chain(retriever_topk, document_chain)  # Initial broad search
 retrieval_chain_mmr = create_retrieval_chain(retriever_mmr, document_chain)    # Apply MMR re-ranking
 
 # %%
-for d in enhanced_docslist:
-    print(d)
+# for i, d in enumerate(docslist):
+#     print(f"========{i}========")
+#     print(d.page_content)
 
 # %%
 import pprint
-query = "give me emails related to price fixing"
+# "What does randy need to send a schedule of?",
+#     "What are some of randy's action items?",
+#     "What is Philip's proposal focused on, and can you provided details about the proposal?",
+#     "Can you provide me more detail about the microturbine power generation deal?"
+llm.groq_api_key = random.choice(api_keys)
+query = "What are some of randy's action items?"
 pprint.pprint(retrieval_chain_topk.invoke({"input":query}))
 llm.groq_api_key = random.choice(api_keys)
 pprint.pprint(retrieval_chain_mmr.invoke({"input":query}))
 
 # %%
-query = "query: emails related to price fixing"
-query_embedding = np.array(model.embed_query(query))
-query_embedding = l2_normalize(query_embedding)  # Now a 1D vector normalized correctly
-
-# Perform MMR search using the correctly shaped query embedding
-mmr_scores = db.max_marginal_relevance_search_with_score_by_vector(
-    embedding=query_embedding.tolist(),  # Pass as a list of floats
-    k=20, fetch_k=100,lambda_mult=0.3
+from langchain_community.vectorstores.faiss import FAISS
+import numpy as np
+test_questions = [
+    "What does randy need to send a schedule of?",
+    "What are some of randy's action items?",
+    "What is Philip's proposal focused on, and can you provided details about the proposal?",
+    "Can you provide me more detail about the microturbine power generation deal?",
+    "What needs to be faxed?"
+]
+for text in test_questions:
+    # Define query
+    query = "query: " + text
+    pprint.pprint(retrieval_chain_topk.invoke({"input":query}))
+    llm.groq_api_key = random.choice(api_keys)
     
-)
 
-# Extract and display MMR results
-mmr_list = sorted([(score, doc) for doc, score in mmr_scores], reverse=True)
+# %%
+from langchain_community.vectorstores.faiss import FAISS
+import numpy as np
+test_questions = [
+    "What does randy need to send a schedule of?",
+    "What are some of randy's action items?",
+    "What is Philip's proposal focused on, and can you provided details about the proposal?",
+    "Can you provide me more detail about the microturbine power generation deal?",
+    "What needs to be faxed?"
+]
+for text in test_questions:
+    print("=========================================================")
+    query = "query: " + text
+    query_embedding = np.array(model.embed_query(query))
+    # query_embedding = l2_normalize(query_embedding)  
+    topk_results = db.similarity_search_with_score_by_vector(
+        embedding=query_embedding.tolist(),  # List[float]
+        k=20
+    )
 
-for score, doc in mmr_list:
-    print(f"Document: {doc.page_content[:10000]} {str(doc.metadata)[:10]} |MMR Score: {score}")
+    mmr_results = db.max_marginal_relevance_search_with_score_by_vector(
+        embedding=query_embedding.tolist(),  # List[float]
+        k=20,
+        lambda_mult=0.8         
+    )
+
+    # Sort by L2 distance (ascending: lower = more similar)
+    topk_sorted = sorted(topk_results, key=lambda x: x[1])
+    
+    mmr_sorted = sorted(mmr_results, key=lambda x: x[1], reverse=True)
+
+    # Display results with L2 distance and cosine similarity
+    for doc, mmr_score in mmr_sorted:
+        # docembedding = l2_normalize(np.array(modelemb.embed_documents([doc.page_content])))
+        # cos_sim = float(np.dot(query_embedding, docembedding.reshape(-1)))
+        print(f"Document: {doc.page_content[:100]} | MMR Score: {mmr_score:.4f}")
+        
+    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    for doc, l2_score in topk_sorted:
+        # Convert L2 distance to cosine similarity (assuming L2-normalized)
+        cosine_sim = 1 - (l2_score ** 2) / 2
+        print(f"Document: {doc.page_content[:100]} | L2 Distance: {l2_score:.4f} | Cosine Sim: {cosine_sim:.4f}")
 
 
 # %%
 # for doc in docslist:
 #     print(len(doc.page_content.split()))
-    
 
 # %%
 from langchain_core.tools import tool
 
 # Ensure retrieval_chain is correctly defined before calling this tool
 @tool
-def ragtool(query: str) -> str:
+def ragtool(query: str, num_docs: int) -> str:
     """
     This is a retrieval-augmented generation (RAG) tool that queries a vector store 
     containing Enron emails.
     
     Parameters:
     query (str): The input query for retrieval.
-    
+    num_docs (int): The number of documents to retrieve.
     Returns:
     str: The retrieved answer from the vector store.
     """
     try:
-        answer = retrieval_chain_mmr.invoke({"input": query})['answer']
+        answer = retrieval_chain_topk.invoke({"input": query})['answer']
         return f"Here is the ANSWER. \n ```{answer}```\n DO NOT USE THE TOOL REPEATEDLY. SHOW THE ANSWER TO THE USER. \n"
     except Exception as e:
         return f"Error: Failed to retrieve answer. Details: {str(e)}"
+
+# %%
+from langchain.tools import tool
+from langchain.retrievers.self_query.base import SelfQueryRetriever
+from langchain.chains.query_constructor.schema import AttributeInfo
+
+metadata_field_info = [
+    AttributeInfo(
+        name="date",
+        description="Date the email was sent, in the format MM-DD-YYYY",
+        type="string",
+    ),
+    AttributeInfo(
+        name="sender",
+        description="Email address of the sender",
+        type="string",
+    ),
+    AttributeInfo(
+        name="recipient",
+        description="Email address of the recipient",
+        type="string",
+    ),
+    AttributeInfo(
+        name="subject",
+        description="Subject of the email",
+        type="string",
+    ),
+]
+
+
+@tool
+def dynamic_retrieve(query: str, k: int = 5, threshold: float = 0.7) -> list:
+    """
+    Retrieves relevant documents with customizable parameters using SelfQueryRetriever.
+    
+    Args:
+        query (str): The user question or query.
+        k (int): Number of documents to retrieve.
+        threshold (float): Minimum similarity threshold.
+
+    Returns:
+        list: Retrieved documents.
+    """
+    retriever = SelfQueryRetriever.from_llm(
+        llm=llm,
+        vectorstore=db,
+        document_contents="Email body content and extracted entities",
+        metadata_field_info=metadata_field_info,
+        search_kwargs={
+            "k": k,
+            "fetch_k": 2 * k,
+            "score_threshold": threshold,
+            "search_type": "similarity_score_threshold"
+        }
+    )
+
+    docs = retriever.invoke(query)
+    retstr = []
+    for doc in docs:
+        retstr.append(
+            f"Source: {doc.metadata.get('sender', '')}\n"
+            f"Date: {doc.metadata.get('date', '')}\n"
+            f"Recipients: {doc.metadata.get('recipient', '')}\n"
+            f"Subject: {doc.metadata.get('subject', '')}\n"
+            f"Entities: {doc.metadata.get('entities', '')}\n\n"
+            f"Content: {doc.page_content}\n\n"
+        )
+    return retstr
+
 
 
 # %%
@@ -673,14 +844,14 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 
 
-toolnode = ToolNode([ragtool])
+toolnode = ToolNode([dynamic_retrieve])
 
 def call_model(state: MessagesState):
     state["messages"]
     messages = state["messages"]
     #print(messages)
     llm.groq_api_key = random.choice(api_keys)
-    llm_with_tool = llm.bind_tools([ragtool])
+    llm_with_tool = llm.bind_tools([dynamic_retrieve])
     response = llm_with_tool.invoke(messages)
     
     
@@ -732,6 +903,306 @@ while True:
     time.sleep(1)
 
 # %%
+# Advanced query handling with multi-query generation
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+
+# Define the multi-query prompt template
+# This template instructs the LLM to generate multiple search queries from a single user question
+multi_template = """You are an expert at querying search engines. You specialize in understanding natural language queries and generating multiple search
+queries that, taken together, would help provide a comprehensive answer to the user's question.
+
+Main Question: {question}
+
+Let's break this down. Generate 4 search queries for querying a knowledge store about emails. 
+Make sure these queries use language that would appear in actual emails.
+Remember to keep them short, using keywords that would be found in emails.
+Keep them straightforward and distinct from each other.
+Formulate them from different angles to solve the main query.
+
+Return a bullet list with • at the start of each question:
+
+• query 1
+• query 2
+• etc.
+"""
+
+# Create a processor to generate multiple search queries from a single question
+multi_query_prompt = PromptTemplate.from_template(multi_template)
+multi_query_chain = multi_query_prompt | llm | StrOutputParser()
+
+# %%
+# Define function to run multiple queries and combine results for better coverage
+import time
+
+def run_multi_query(main_query, query_generator=multi_query_chain, single_query_chain=retrieval_chain):
+    """
+    Run a multi-query retrieval process to improve search results accuracy.
+    
+    This function:
+    1. Takes a user query and generates multiple search queries using the LLM
+    2. Executes each generated query against the retrieval system
+    3. Combines and summarizes the results for a comprehensive answer
+    
+    Args:
+        main_query: The original user question
+        query_generator: Chain to generate multiple search queries
+        single_query_chain: Chain to execute individual queries
+        
+    Returns:
+        Dictionary with consolidated results and performance metrics
+    """
+    # Start timing the process
+    start_time = total_start_time = time.time()
+    
+    # Generate multiple search queries from the main question
+    result = query_generator.invoke({"question": main_query})
+    
+    # Extract the generated queries from the bullet point list
+    sub_questions = [q.strip() for q in result.split('•') if q.strip()]
+    
+    # Record query generation time
+    gen_time = time.time() - start_time
+    start_time = time.time()
+    
+    # Track all retrieved documents and their sources
+    all_docs = []
+    all_results = []
+    
+    # Process each generated query
+    print("Generated Questions:")
+    for i, question in enumerate(sub_questions):
+        print(f"{i+1}. {question}")
+        # Execute the query against the retrieval system
+        chain_result = single_query_chain.invoke({"input": question})
+        all_results.append(chain_result)
+        
+        # Track the documents retrieved for this query
+        if "context" in chain_result:
+            all_docs.extend(chain_result["context"])
+    
+    # Record search execution time
+    search_time = time.time() - start_time
+    
+    # Calculate combined result using the original query
+    # This ensures the answer is based on all retrieved information
+    final_answer = single_query_chain.invoke({
+        "input": main_query,
+        "context": all_docs[:10]  # Limit to top 10 most relevant documents
+    })
+    
+    # Record total processing time
+    total_time = time.time() - total_start_time
+    
+    # Return comprehensive results with timing metrics
+    return {
+        "main_query": main_query,
+        "generated_queries": sub_questions,
+        "individual_answers": all_results,
+        "final_answer": final_answer["answer"],
+        "all_docs": all_docs,
+        "timing": {
+            "query_generation": gen_time,
+            "search_execution": search_time,
+            "total_processing": total_time
+        }
+    }
+
+
+# %% 
+# Define test queries for evaluating retrieval performance
+test_queries = [
+    "What do we know about Skilling's involvement in Enron's financial reporting?",
+    "What are the main topics discussed in emails from Kenneth Lay?",
+    "How did Enron executives discuss the California energy crisis in their emails?",
+    "What discussions were happening about LJM partnerships in the months before Enron's collapse?",
+    "What was discussed about mark-to-market accounting in emails?",
+    "Who was responsible for overseeing Special Purpose Entities at Enron?",
+    "What communication happened regarding Raptor structures?",
+]
+
+# %%
+# Example usage - process a test query with advanced retrieval
+#result = run_multi_query(test_queries[0])
+# Print the final answer
+#print(result["final_answer"])
+
+# %%
+# Define tools for integration with LLMs and agent frameworks
+from langchain_core.tools import tool
+
+# Create a RAG tool for Enron email queries - allows LLM to retrieve context
+@tool
+def ragtool(query: str, num_docs: int) -> str:
+    """
+    This is a retrieval-augmented generation (RAG) tool that queries a vector store 
+    containing Enron emails.
+    
+    Parameters:
+    query (str): The input query for retrieval.
+    num_docs (int): The number of documents to retrieve.
+    Returns:
+    str: The retrieved answer from the vector store.
+    """
+    try:
+        answer = retrieval_chain_topk.invoke({"input": query})['answer']
+        return f"Here is the ANSWER. \n ```{answer}```\n DO NOT USE THE TOOL REPEATEDLY. SHOW THE ANSWER TO THE USER. \n"
+    except Exception as e:
+        return f"Error: Failed to retrieve answer. Details: {str(e)}"
+
+# %%
+# Define a metadata-aware retrieval tool for more precise filtering
+from langchain.tools import tool
+from langchain.retrievers.self_query.base import SelfQueryRetriever
+from langchain.chains.query_constructor.schema import AttributeInfo
+
+# Define metadata fields that can be used for filtering
+metadata_field_info = [
+    AttributeInfo(
+        name="date",
+        description="Date the email was sent, in the format MM-DD-YYYY",
+        type="string",
+    ),
+    AttributeInfo(
+        name="sender",
+        description="Email address of the sender",
+        type="string",
+    ),
+    AttributeInfo(
+        name="recipient",
+        description="Email address of the recipient",
+        type="string",
+    ),
+    AttributeInfo(
+        name="subject",
+        description="Subject of the email",
+        type="string",
+    ),
+]
+
+
+@tool
+def dynamic_retrieve(query: str, k: int = 5, threshold: float = 0.7) -> list:
+    """
+    Retrieves relevant documents with customizable parameters using SelfQueryRetriever.
+    
+    Args:
+        query (str): The user question or query.
+        k (int): Number of documents to retrieve.
+        threshold (float): Minimum similarity threshold.
+
+    Returns:
+        list: Retrieved documents.
+    """
+    retriever = SelfQueryRetriever.from_llm(
+        llm=llm,
+        vectorstore=db,
+        document_contents="Email body content and extracted entities",
+        metadata_field_info=metadata_field_info,
+        search_kwargs={
+            "k": k,
+            "fetch_k": 2 * k,
+            "score_threshold": threshold,
+            "search_type": "similarity_score_threshold"
+        }
+    )
+
+    docs = retriever.invoke(query)
+    retstr = []
+    for doc in docs:
+        retstr.append(
+            f"Source: {doc.metadata.get('sender', '')}\n"
+            f"Date: {doc.metadata.get('date', '')}\n"
+            f"Recipients: {doc.metadata.get('recipient', '')}\n"
+            f"Subject: {doc.metadata.get('subject', '')}\n"
+            f"Entities: {doc.metadata.get('entities', '')}\n\n"
+            f"Content: {doc.page_content}\n\n"
+        )
+    return retstr
+
+
+
+# %%
+# Setup agent framework with LangGraph for interactive email analysis
+from typing import Literal
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langgraph.graph import StateGraph, START, END, MessagesState
+from langgraph.checkpoint.memory import MemorySaver
+from langchain.memory import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langgraph.prebuilt import ToolNode, tools_condition
+
+# Create a tool node for the agent to use
+toolnode = ToolNode([dynamic_retrieve])
+
+# Define the agent's reasoning function
+def call_model(state: MessagesState):
+    state["messages"]
+    messages = state["messages"]
+    #print(messages)
+    llm.groq_api_key = random.choice(api_keys)
+    llm_with_tool = llm.bind_tools([dynamic_retrieve])
+    response = llm_with_tool.invoke(messages)
+    
+    
+    return {"messages": [response]}
+
+# Define a router function to handle tool calls
+from langgraph.graph import END
+def router_function(state: MessagesState) -> Literal["tools", END]:
+    messages = state["messages"]
+    last_message = messages[-1]
+    if last_message.tool_calls:
+        return "tools"
+    return END
+
+# Set up the agent workflow graph
+memory = MemorySaver()
+workflow = StateGraph(MessagesState)    
+workflow.add_node("agent", call_model)
+workflow.add_node(toolnode)
+workflow.add_edge(START, "agent")
+workflow.add_conditional_edges(
+    "agent",
+    router_function,
+    {
+       "tools": "tools",
+       END: END,
+    },
+)
+workflow.add_edge("tools", "agent")
+app = workflow.compile(checkpointer=memory)
+
+
+
+# %%
+# Generate visualization of the agent workflow
+from IPython.display import display_png
+display_png(app.get_graph().draw_mermaid_png(),raw=True)
+
+# %%
+# Interactive chat loop for querying the email database
+import time
+while True:
+    theinput = input("Enter something: ")
+    if 'exit' in theinput:
+        break
+    inp = {"messages":[theinput]}
+    
+    config = {"configurable": {"thread_id": 1}}
+    events = app.stream(inp, config=config, stream_mode="values")
+
+    for event in events:
+        event["messages"][-1].pretty_print()
+    time.sleep(1)
+
+# %%
+# The following code is an alternative agent design that was commented out
+# It shows a more complex workflow with filtering tools and summarization
+# Keeping as reference for potential future implementation
 # from typing import Literal, List
 # from langchain_core.runnables.history import RunnableWithMessageHistory
 # from langgraph.graph import StateGraph, START, END, MessagesState
@@ -853,6 +1324,7 @@ while True:
 
 #     for event in events:
 #         event["messages"][-1].pretty_print()
+
 
 
 
