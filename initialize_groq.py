@@ -12,6 +12,7 @@ and provides easy access to different Groq models.
 
 from groq import Groq
 from langchain_groq import ChatGroq
+from custom_llama_llm import CustomLlamaChatModel
 import random
 
 # List of API keys to use with random selection 
@@ -85,8 +86,9 @@ def init_groq(model_name = "llama-3.3-70b-versatile"):
     )
 
     # Create a LangChain ChatGroq instance with streaming enabled
-    llm = ChatGroq(groq_api_key = client.api_key,
-                model_name = model_name, streaming=True)
+    # llm = ChatGroq(groq_api_key = client.api_key,
+    #             model_name = model_name, streaming=True)
+    llm = CustomLlamaChatModel()
     
     # Return both the raw client and the LangChain model
     return client, llm
