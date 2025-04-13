@@ -1,3 +1,4 @@
 .env
 glinermodellocal/
 qdrant_db/
+qdrant_db/collection/my_documents/storage.sqlite
