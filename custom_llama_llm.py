@@ -25,7 +25,7 @@ from pydantic import Field
 # ========= Llama API Configuration ============
 API_URL = "https://api.llms.afterhoursdev.com/completions"
 API_KEY = os.environ.get("LLAMA_API_KEY")  # Make sure this environment variable is set.
-print(f"API_KEY: {API_KEY}")
+# print(f"API_KEY: {API_KEY}")
 SESSION_TOKEN = ""
 MODEL_NAME = "meta-llama3.3-70b"
 SYSTEM_PROMPT = "You are a helpful assistant"
