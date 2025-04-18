@@ -23,12 +23,14 @@ This project implements a sophisticated Retrieval Augmented Generation (RAG) sys
 ### Setup
 
 1. Clone the repository:
+
    ```bash
    git clone <repository-url>
    cd EnronEmailDataset
    ```
 
 2. Install dependencies:
+
    ```bash
    pip install -r requirements.txt
    ```
@@ -45,9 +47,10 @@ The system can be run in either interactive (Jupyter) or script mode:
 
 #### Jupyter Notebook Mode
 
-1. Open `emailrag3.ipynb` in Jupyter:
+1. Open `main.ipynb` in Jupyter:
+
    ```bash
-   jupyter notebook emailrag.ipynb
+   jupyter notebook main.ipynb
    ```
 
 2. Execute the cells sequentially to process the data, create chunks, and build the vector index.
@@ -56,7 +59,7 @@ The system can be run in either interactive (Jupyter) or script mode:
 
 1. Run the complete processing pipeline after exporting emailrag3.ipynb to a .py script:
    ```bash
-   python emailrag3.py
+   python main.py
    ```
 
 ### Querying the System
@@ -124,7 +127,7 @@ enhanced_docslist = optimized_process_emails(email_texts, batch_size=50)
 The system includes entities directly in the document content to improve vector search for entity-focused queries:
 
 ```
-"passage: Meeting scheduled for tomorrow... 
+"passage: Meeting scheduled for tomorrow...
 Entities found: date: tomorrow, Thursday; person: John Smith, Sarah Jones; event: meeting, conference call."
 ```
 
@@ -136,8 +139,9 @@ Entities found: date: tomorrow, Thursday; person: John Smith, Sarah Jones; event
 
 ## File Structure
 
-- `emailrag.py` - Main processing script
-- `emailrag.ipynb` - Jupyter notebook version
+- `main.ipynb` - Main processing script
+- `chunking.py` - Chunking process
+- `utilities.py` - Utilities functions used in main.ipynb
 - `initialize_groq.py` - Groq LLM integration
 - `data/` - Directory for email data
 - `email_faiss_normalized_e5/` - FAISS vector storage
