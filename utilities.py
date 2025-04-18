@@ -15,9 +15,6 @@ from langgraph.graph import END
 import time
 
 
-"""
-
-"""
 def clean_text(text: str) -> str:
     """
     Clean text while preserving useful characters:
@@ -38,9 +35,6 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-"""
-
-"""
 def parse_email_date(date_tokens: List[str]) -> str:
     raw_date_str = " ".join(date_tokens)
     try:
@@ -50,8 +44,7 @@ def parse_email_date(date_tokens: List[str]) -> str:
         print(f"Date parse error: {e}")
         return "unknown"
 
-"""
-"""
+
 def extract_email_metadata(msg, df_idx):
     split_msg = msg.split()
     metadata = {}
@@ -73,6 +66,18 @@ def extract_email_metadata(msg, df_idx):
     except Exception as e:
         print("Metadata extraction error:", e)
     return metadata, split_msg
+
+# Define the agent's reasoning function
+def call_model(state: MessagesState):
+    state["messages"]
+    messages = state["messages"]
+    #print(messages)
+    groqllm.groq_api_key = random.choice(api_keys)
+    llm_with_tool = groqllm.bind_tools([ragtool])
+    response = llm_with_tool.invoke(messages)
+    
+    
+    return {"messages": [response]}
 
 @tool
 def ragtool(query: str, num_docs: int) -> str:
