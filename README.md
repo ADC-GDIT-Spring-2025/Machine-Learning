@@ -1,17 +1,16 @@
 # Enron Email Dataset Retrieval Augmented Generation System
 
-An advanced system for processing, indexing, and semantically querying the Enron Email Dataset using enhanced chunking strategies, named entity recognition, and large language models.
+An advanced system for semantically processing and querying the Enron Email Dataset using vector databases, named entity recognition, enhanced chunking, and custom LLM integration.
 
 ## Project Overview
 
-This project implements a sophisticated Retrieval Augmented Generation (RAG) system specifically designed for email corpora like the Enron Email Dataset. It features:
+This project implements a Retrieval Augmented Generation (RAG) system optimized for email corpora like the Enron Email Dataset. It features:
 
-- **Enhanced Semantic Chunking**: Text is chunked based on semantic coherence while preserving entity boundaries
-- **Named Entity Recognition**: GLiNER integration to extract and utilize entities in the text
-- **Overlap Management**: Ensures context continuity between chunks with controlled sentence overlap
-- **Vector Search**: FAISS and Qdrant integration for efficient similarity search
-- **LLM Integration**: Groq LLM integration for natural language generation
-- **Optimized Processing Pipeline**: Batch processing and caching for efficient handling of large datasets
+- **Enhanced Semantic Chunking**: Text is chunked based on semantic coherence while preserving entity boundaries.
+- **Named Entity Recognition (NER)**: GLiNER integration extracts and embeds entities into document metadata.
+- **Sentence Overlap**: Maintains context continuity between chunks.
+- **Vector Search with Qdrant**: Enables efficient cosine similarity and MMR search.
+- **Multi-query Expansion**: Uses a prompt-driven approach to generate multiple search queries per user input.
 
 ## Installation
 
@@ -35,128 +34,85 @@ This project implements a sophisticated Retrieval Augmented Generation (RAG) sys
    pip install -r requirements.txt
    ```
 
-3. Download the Enron Email Dataset and place it in the `data` directory or update the path in the code.
-
-4. (Optional) Download or prepare a subset of the dataset in CSV format.
+3. Place the Enron email CSV file in the `data/` directory as `emails.csv`.
 
 ## Usage
 
 ### Processing and Indexing Emails
 
-The system can be run in either interactive (Jupyter) or script mode:
+Emails are cleaned, metadata is extracted, and documents are chunked semantically:
 
-#### Jupyter Notebook Mode
+```python
+metadata, split_msg = extract_email_metadata(msg, idx)
+documents = enhanced_chunker.create_documents(
+    texts=[clean_text(msg)],
+    metadatas=[metadata]
+)
+```
 
-1. Open `main.ipynb` in Jupyter:
+Vector storage is managed using Qdrant:
 
-   ```bash
-   jupyter notebook main.ipynb
-   ```
-
-2. Execute the cells sequentially to process the data, create chunks, and build the vector index.
-
-#### Script Mode
-
-1. Run the complete processing pipeline after exporting emailrag3.ipynb to a .py script:
-   ```bash
-   python main.py
-   ```
+```python
+db = Qdrant.from_existing_collection(modelemb, "emails_e5_qdrant", VECTOR_DB_NAME)
+```
 
 ### Querying the System
 
-Once the emails are processed and indexed, you can query the system using:
+Queries can be handled with semantic vector search using MMR and score-threshold approaches:
 
 ```python
-# Example query
-query = "Find emails related to energy trading policies"
-results = retrieval_chain.invoke({"input": query})
-print(results["answer"])
+retriever = db.as_retriever(search_kwargs={'k':20, 'search_type':'mmr'})
+results = retrieval_chain_mmr.invoke({"input": "What did tung tung tung tung sahur tell baby gronk?"})
+```
+
+### Multi-query Retrieval
+
+Multiple subqueries are generated for comprehensive search coverage:
+
+```python
+result = run_multi_query("What was discussed about mark-to-market accounting?")
+print(result["final_answer"])
 ```
 
 ## Key Components
 
 ### EnhancedSemanticChunker
 
-The core of the system is the `EnhancedSemanticChunker` class which extends LangChain's `SemanticChunker` with:
+Extends LangChain's `SemanticChunker` with:
 
-- Named entity recognition to preserve entity mentions across chunk boundaries
-- Sentence-level overlap to maintain context between chunks
-- Entity metadata enrichment for better retrieval
+- NER-aware chunk boundaries using GLiNER
+- Overlap handling at the sentence level
+- Chunk enrichment with human-readable entity summaries
 
-```python
-chunker = EnhancedSemanticChunker(
-    embeddings=embedding_model,
-    gliner_model=ner_model,
-    breakpoint_threshold_amount=5,
-    min_chunk_size=3,
-    overlap_sentences=1
-)
-```
+### Custom LLM Wrapper
 
-### Groq LLM Integration
+Implements a LangChain-compatible wrapper over a remote LLaMA API with streaming and token tracking support.
 
-The system uses Groq's high-performance LLMs via the `initialize_groq.py` module:
+### Retrieval Pipelines
 
-```python
-from initialize_groq import init_groq
+- **Top-K Similarity Search**
+- **MMR Re-ranking**
+- **Score Threshold Search**
 
-client, llm = init_groq(model_name="llama-3.3-70b-versatile")
-```
+## Performance Tips
 
-### Retrieval Strategies
-
-Different retrieval strategies are implemented:
-
-- **Top-K Similarity**: Find the most similar documents by vector similarity
-- **Maximum Marginal Relevance (MMR)**: Balance relevance with diversity
-- **Dynamic Threshold Retrieval**: Only retrieve documents above a similarity threshold
-
-## Advanced Features
-
-### Optimized Batching
-
-Process large datasets efficiently with batching and parallel processing:
-
-```python
-# Process in batches with parallel execution
-enhanced_docslist = optimized_process_emails(email_texts, batch_size=50)
-```
-
-### Entity-Enhanced Retrieval
-
-The system includes entities directly in the document content to improve vector search for entity-focused queries:
-
-```
-"passage: Meeting scheduled for tomorrow...
-Entities found: date: tomorrow, Thursday; person: John Smith, Sarah Jones; event: meeting, conference call."
-```
-
-## Performance Considerations
-
-- Processing large email datasets is resource-intensive. Start with a small subset for testing.
-- GPU acceleration significantly speeds up named entity recognition.
-- Consider using caching for embeddings and NER to avoid redundant processing.
+- Use GPU (`torch.cuda.is_available()`) for NER and embedding models.
+- Cache intermediate chunking and embedding results to speed up reprocessing.
 
 ## File Structure
 
-- `main.ipynb` - Main processing script
-- `chunking.py` - Chunking process
-- `utilities.py` - Utilities functions used in main.ipynb
-- `initialize_groq.py` - Groq LLM integration
-- `data/` - Directory for email data
-- `email_faiss_normalized_e5/` - FAISS vector storage
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+- `chunking.py` – Chunker logic
+- `utilities.py` – Cleaning and metadata extraction
+- `custom_llama_llm.py` – Custom LLM interface
+- `initialize_groq.py` – Random API key loader (used for LLM)
+- `data/` – Directory containing `emails.csv`
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT License
 
 ## Acknowledgments
 
-- The Enron Email Dataset
-- LangChain for the foundational RAG components
+- Enron Email Dataset
 - GLiNER for Named Entity Recognition
-- Groq for LLM API access
+- LangChain and Qdrant for RAG infrastructure
